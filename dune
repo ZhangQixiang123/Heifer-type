@@ -2,11 +2,14 @@
 ; build web version
 
 (rule
+ (alias web)
  (action (copy main/hipjs.bc.js hipjs.bc.js)))
 (rule
+ (alias web)
  (action (copy web/main.js main.js)))
 
 (rule
+ (alias web)
  (target coi-serviceworker.min.js)
  (action (run curl -sOL https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js)))
 
@@ -17,6 +20,7 @@
  (action (run web/examples.sh web/index.html index.html)))
 
 (rule
+ (alias web)
  (targets z3-built.js z3-built.wasm)
  (deps (source_tree node_modules))
  (action (progn
@@ -24,13 +28,16 @@
   (run cp node_modules/z3-solver/build/z3-built.js z3-built.js))))
 
 (rule
+ (alias web)
  (targets bundle.js)
- (deps main.js)
- (action (run browserify main.js -o bundle.js --standalone z3)))
+ (deps main.js (source_tree node_modules))
+ (action (bash "node node_modules/browserify/bin/cmd.js main.js -o bundle.js --standalone z3")))
 
 (rule
+ (alias web)
  (action (copy web/page.js page.js)))
 (rule
+ (alias web)
  (action (copy web/ace_ocaml.js ace_ocaml.js)))
 
 (rule

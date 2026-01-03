@@ -1,3 +1,5 @@
+[@@@warning "-33"]  (* Disable unused open warnings *)
+
 open Brr
 open Utils.Misc
 open Hipcore_typed

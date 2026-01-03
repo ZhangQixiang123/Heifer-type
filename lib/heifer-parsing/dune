@@ -1,5 +1,6 @@
 
 (library
   (name ocamlfrontend)
+  (public_name heifer.ocamlfrontend)
   (modules core_lang annotation core_lang_typed)
   (libraries hipcore ocaml_compiler parsing utils hipprover))

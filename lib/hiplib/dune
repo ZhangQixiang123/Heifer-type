@@ -1,5 +1,6 @@
 (library
  (name hiplib)
+ (public_name heifer.hiplib)
  (modules hiplib tests)
  (libraries ocamlfrontend ocaml_compiler utils hipprover hipcore)
  (inline_tests)

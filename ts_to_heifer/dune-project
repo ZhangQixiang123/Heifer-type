@@ -1,0 +1,35 @@
+(lang dune 3.8)
+
+(name ts_to_heifer)
+
+(generate_opam_files true)
+
+(source
+ (github yourusername/ts-to-heifer))
+
+(authors "Your Name")
+
+(maintainers "Your Name")
+
+(license MIT)
+
+(documentation https://github.com/yourusername/ts-to-heifer)
+
+(package
+ (name ts_to_heifer)
+ (synopsis "TypeScript to Heifer IR Transpiler")
+ (description
+  "A transpiler that converts TypeScript programs to Heifer's typed intermediate representation for verification of effectful higher-order programs.")
+ (depends
+  (ocaml
+   (>= 5.0))
+  dune
+  heifer
+  (yojson
+   (>= 2.0))
+  (ppx_deriving
+   (>= 5.0))
+  (ppx_deriving_yojson
+   (>= 3.0)))
+ (tags
+  ("typescript" "verification" "heifer" "transpiler" "formal-methods")))

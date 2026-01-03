@@ -1,0 +1,5 @@
+(library
+ (name ts_to_heifer)
+ (public_name ts_to_heifer)
+ (modules translator)
+ (libraries yojson heifer.hipcore_common heifer.hipcore_typed heifer.parsing))

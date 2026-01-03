@@ -1,0 +1,9 @@
+(executable
+ (public_name ts_to_heifer)
+ (name main)
+ (libraries ts_to_heifer))
+
+(executable
+ (public_name ts_verify)
+ (name verify)
+ (libraries ts_to_heifer heifer.hiplib heifer.hipcore_typed))
