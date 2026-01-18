@@ -127,6 +127,13 @@ let rec string_of_term t : string =
       | [x] -> string_of_term x
       | x:: xs -> string_of_term x ^","^ helper xs
     in "(" ^ helper nLi ^ ")"
+  | TRecordTerm fields ->
+    let field_strs = List.map (fun (name, value) ->
+      Format.sprintf "%s: %s" name (string_of_term value)
+    ) fields |> String.concat "; " in
+    "{" ^ field_strs ^ "}"
+  | TGetField (record, field) ->
+    Format.sprintf "(%s).%s" (string_of_term record) field
 
   (* | TList nLi ->
     let rec helper li =
@@ -190,6 +197,11 @@ and string_of_kappa (k:kappa) : string =
   match k with
   | EmptyHeap -> "emp"
   | PointsTo  (str, args) -> Format.sprintf "%s->%s" str (List.map string_of_term [args] |> String.concat ", ")
+  | RecordPointsTo (loc, fields) ->
+      let field_strs = List.map (fun (name, value) ->
+        Format.sprintf "%s: %s" name (string_of_term value)
+      ) fields |> String.concat "; " in
+      Format.sprintf "%s->{%s}" loc field_strs
   | SepConj (k1, k2) -> string_of_kappa k1 ^ "*" ^ string_of_kappa k2
   (*| MagicWand (k1, k2) -> "(" ^ string_of_kappa k1 ^ "-*" ^ string_of_kappa k2  ^ ")" *)
   (* | Implication (k1, k2) -> string_of_kappa k1 ^ "-*" ^ string_of_kappa k2  *)
@@ -292,6 +304,16 @@ and string_of_core_lang (e:core_lang) :string =
   | CLambda (xs, spec, e) -> Format.sprintf "fun %s%s -> %s" (String.concat " " xs) (match spec with None -> "" | Some ds -> Format.asprintf " (*@@ %s @@*)" (string_of_staged_spec ds)) (string_of_core_lang e)
   | CShift (b, k, e) -> Format.sprintf "Shift%s %s -> %s" (if b then "" else "0") k (string_of_core_lang e)
   | CReset (e) -> Format.sprintf "<%s>" (string_of_core_lang e)
+  (* Record operations *)
+  | CRecord fields ->
+      let field_strs = fields |> List.map (fun (name, value) ->
+        Format.sprintf "%s = %s" name (string_of_core_lang value)
+      ) |> String.concat "; " in
+      Format.sprintf "{ %s }" field_strs
+  | CGetField (record, field) ->
+      Format.sprintf "(%s).%s" (string_of_core_lang record) field
+  | CSetField (record, field, value) ->
+      Format.sprintf "(%s).%s <- %s" (string_of_core_lang record) field (string_of_core_lang value)
 
 and string_of_intermediate (i : intermediate) =
   match i with
@@ -404,7 +426,7 @@ let rec string_of_type t =
   | TyString -> "string"
   | Int -> "int"
   | Unit -> "unit"
-  | TConstr (name, args) -> 
+  | TConstr (name, args) ->
       if List.is_empty args
       then name
       else Format.asprintf "(%s) %s" (List.map string_of_type args |> String.concat ",") name
@@ -412,6 +434,11 @@ let rec string_of_type t =
   | Lamb -> "lambda"
   | TVar v -> Format.asprintf "'%s" v
   | Arrow (t1, t2) -> Format.asprintf "%s->%s" (string_of_type t1) (string_of_type t2)
+  | TRecord fields ->
+      let field_strs = fields |> List.map (fun (name, typ) ->
+        Format.asprintf "%s: %s" name (string_of_type typ)
+      ) |> String.concat "; " in
+      Format.asprintf "{ %s }" field_strs
 
 let string_of_type_declaration tdecl =
   let open Types in
@@ -599,7 +626,13 @@ let rec pp_term ppf t =
       (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ";@ ") pp_term) args *)
   | TTuple args ->
       fprintf ppf "(@[<hov 1>%a@])"
-      (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ",@ ") pp_term) args 
+      (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ",@ ") pp_term) args
+  | TRecordTerm fields ->
+      fprintf ppf "{@[<hov 1>%a@]}"
+      (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ";@ ")
+        (fun ppf (name, value) -> fprintf ppf "%s:@ %a" name pp_term value)) fields
+  | TGetField (record, field) ->
+      fprintf ppf "(%a).%s" pp_term record field
   | Type t -> fprintf ppf "%a" pp_type t
 and pp_call_like : 'a. (Format.formatter -> 'a -> unit) -> Format.formatter -> string * 'a list -> unit
   = fun pp_arg ppf (f, args) ->
@@ -636,6 +669,10 @@ and pp_kappa ppf k =
   match k with
   | EmptyHeap -> fprintf ppf "emp"
   | PointsTo (loc, t) -> fprintf ppf "@[%s@ ->@ @[<hov 1>(%a)@]@]" loc pp_term t
+  | RecordPointsTo (loc, fields) ->
+      fprintf ppf "@[%s@ ->@ {@[<hov 1>%a@]}@]" loc
+      (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ";@ ")
+        (fun ppf (name, value) -> fprintf ppf "%s:@ %a" name pp_term value)) fields
   | SepConj (k1, k2) -> fprintf ppf "@[<hov 1>(%a)@]@ *@ @[<hov>(%a)@]"
     pp_kappa k1 pp_kappa k2
 and pp_staged_spec ppf spec =
@@ -744,3 +781,13 @@ and pp_core_lang ppf core =
     k
     pp_core_lang e
   | CReset e -> fprintf ppf "@[<%a>@]" pp_core_lang e
+  (* Record operations *)
+  | CRecord fields ->
+      let pp_field ppf (name, value) =
+        fprintf ppf "@[%s@ =@ %a@]" name pp_core_lang value
+      in
+      fprintf ppf "@[{@ %a@ }@]" (pp_print_list ~pp_sep:(fun ppf () -> fprintf ppf ";@ ") pp_field) fields
+  | CGetField (record, field) ->
+      fprintf ppf "@[(%a).%s@]" pp_core_lang record field
+  | CSetField (record, field, value) ->
+      fprintf ppf "@[(%a).%s@ <-@ %a@]" pp_core_lang record field pp_core_lang value

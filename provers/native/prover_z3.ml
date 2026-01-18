@@ -79,6 +79,7 @@ let rec z3_sort_of_typ ctx typ =
             Z3.Datatype.mk_sort_s ctx (string_of_type typ) (List.map process_constructor constructors)
         end
     | Unit -> unit_sort ctx
+    | TRecord _ -> failwith "Inline record types not supported in Z3"
     | TVar _ (* Any type variables encountered at this point can be instantiated with anything, so just use Int for now. *)
     | Lamb (* case carried over from old term_to_expr *)
     (* experimental fix, since lambda-typed terms still appear, even if they aren't used as functions *)
@@ -204,7 +205,9 @@ let rec term_to_expr z3_ctx t : Z3.Expr.expr =
       let type_constructors = Z3.Datatype.get_constructors (z3_sort_of_typ z3_ctx t.term_type) in
       let constr_func = List.find (fun decl -> Z3.Symbol.get_string (Z3.FuncDecl.get_name decl) = name) type_constructors in
       Z3.Expr.mk_app ctx constr_func (List.map (term_to_expr z3_ctx ) args)
-  | TTuple _ -> failwith "term_to_expr"
+  | TTuple _ -> failwith "term_to_expr TTuple"
+  | TRecordTerm _ -> failwith "term_to_expr TRecordTerm not yet supported"
+  | TGetField _ -> failwith "term_to_expr TGetField not yet supported"
 
 let rec pi_to_expr z3_ctx pi: Expr.expr = 
   (* let@ _ = Debug.span (fun r -> debug ~at:5 ~title:"pi_to_expr" "%s ==> %s" (string_of_pi pi) (string_of_result Expr.to_string r)) in *)
@@ -389,6 +392,7 @@ let ex_quantify_expr binders ctx e =
     (* | TConstr of string * typ list *)
     | Int -> Z3.Arithmetic.Integer.mk_sort ctx
     | TConstr (_, _) -> failwith "TConstr"
+    | TRecord _ -> failwith "Inline record types not supported in Z3"
     | Bool -> failwith "Bool"
     | TyString -> failwith "TyString"
     | Lamb -> failwith "Lamb"
@@ -421,6 +425,9 @@ let ex_quantify_expr binders ctx e =
     | CResume _ -> failwith "unimplemented CResume"
     | CLambda (_, _, _) -> failwith "unimplemented CLambda"
     | CShift _ | CReset _ -> failwith "TODO shift and reset expr_to_why3 "
+    | CRecord _ -> failwith "unimplemented CRecord"
+    | CGetField (_, _) -> failwith "unimplemented CGetField"
+    | CSetField (_, _, _) -> failwith "unimplemented CSetField"
 
   let pure_fn_to_logic_fn ctx (pure_fn: pure_fn_def) =
     let decl =

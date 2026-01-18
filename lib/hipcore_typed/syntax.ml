@@ -78,4 +78,5 @@ let rec conjuncts_of_kappa (k : kappa) : kappa list =
   match k with
   | EmptyHeap -> []
   | PointsTo _ -> [k]
+  | RecordPointsTo _ -> [k]
   | SepConj (k1, k2) -> conjuncts_of_kappa k1 @ conjuncts_of_kappa k2

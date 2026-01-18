@@ -56,6 +56,19 @@ let rec unify_types t1 t2 : unit using_env =
       let (), env = unify_types src1 src2 env in
       let (), env = unify_types dst1 dst2 env in
       (), env
+    (* case of record type *)
+    | TRecord fields1, TRecord fields2 ->
+        (* Records must have the same field names in the same order *)
+        if List.length fields1 <> List.length fields2 then
+          raise (Unification_failure (TRecord fields1, TRecord fields2))
+        else
+          let check_field env (name1, typ1) (name2, typ2) =
+            if name1 <> name2 then
+              raise (Unification_failure (TRecord fields1, TRecord fields2))
+            else
+              unify_types typ1 typ2 env |> snd
+          in
+          (), List.fold_left2 check_field env fields1 fields2
     (* case where t1 and t2 are the same type: *)
     | t1, t2 when compare_typ t1 t2 = 0 -> (), env
     (* case where one of the types is Any *)
@@ -247,10 +260,64 @@ let rec infer_types_core_lang e : core_lang using_env =
       in
       return (CMatch (handler_type, tcl, scrutinee, handlers, cases), e.core_type)
 
+  | CRecord fields ->
+      (* Infer types for all field values *)
+      let* typed_fields =
+        fields |> State.map_list ~f:(fun (field_name, field_expr) ->
+          let* typed_expr = infer_types_core_lang field_expr in
+          return (field_name, typed_expr)
+        )
+      in
+      (* Build the record type from field names and their inferred types *)
+      let record_type = TRecord (List.map (fun (name, expr) -> (name, expr.core_type)) typed_fields) in
+      return (CRecord typed_fields, record_type)
+
+  | CGetField (record_expr, field_name) ->
+      let* typed_record = infer_types_core_lang record_expr in
+      let* env = State.get in
+      let field_type = fresh_type_var () in
+      (* Simplify the record type to see if we can extract the field type *)
+      (match TEnv.simplify env.equalities typed_record.core_type with
+       | TRecord fields ->
+           (* Find the field in the record type *)
+           (match List.assoc_opt field_name fields with
+            | Some ft ->
+                let* _ = unify_types field_type ft in
+                return (CGetField (typed_record, field_name), field_type)
+            | None ->
+                failwith (Format.sprintf "Field '%s' not found in record type" field_name))
+       | TVar _ ->
+           (* If it's a type variable, we can't determine the field type yet *)
+           (* For now, just return a fresh type variable *)
+           return (CGetField (typed_record, field_name), field_type)
+       | _ ->
+           failwith (Format.sprintf "CGetField expects a record type, got %s"
+                      (string_of_type typed_record.core_type)))
+
+  | CSetField (record_expr, field_name, value_expr) ->
+      let* typed_record = infer_types_core_lang record_expr in
+      let* typed_value = infer_types_core_lang value_expr in
+      let* env = State.get in
+      (* Verify the field exists and has compatible type *)
+      (match TEnv.simplify env.equalities typed_record.core_type with
+       | TRecord fields ->
+           (match List.assoc_opt field_name fields with
+            | Some ft ->
+                let* _ = unify_types typed_value.core_type ft in
+                return (CSetField (typed_record, field_name, typed_value), Unit)
+            | None ->
+                failwith (Format.sprintf "Field '%s' not found in record type" field_name))
+       | TVar _ ->
+           (* If it's a type variable, we can't verify the field yet *)
+           return (CSetField (typed_record, field_name, typed_value), Unit)
+       | _ ->
+           failwith (Format.sprintf "CSetField expects a record type, got %s"
+                      (string_of_type typed_record.core_type)))
+
   | CLambda (args, spec, core) ->
     let* (args, spec, core), ftyp = infer_types_lambda_like (args, spec, core) in
     return (CLambda (args, spec, core), ftyp)
-  (* the global type information needs information on effect names for this *) 
+  (* the global type information needs information on effect names for this *)
   | CPerform (_, _) -> failwith "effect typing not implemented"
   | CResume _ -> failwith "effect typing not implemented"
   (* types need to be extended with answer type tracking to implement this *)

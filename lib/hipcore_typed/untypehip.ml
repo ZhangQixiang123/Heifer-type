@@ -34,6 +34,8 @@ let rec untype_term (t : term) : Hiptypes.term =
       TLambda (id, List.map ident_of_binder params, Option.map untype_staged_spec spec,
                Option.map untype_core_lang body)
   | TTuple ts -> TTuple (List.map untype_term ts)
+  | TRecordTerm fields -> TRecordTerm (List.map (fun (name, t) -> (name, untype_term t)) fields)
+  | TGetField (record, field) -> TGetField (untype_term record, field)
   | Type t -> Type t
 and untype_pi (p : pi) : Hiptypes.pi =
   match p with
@@ -51,6 +53,8 @@ and untype_kappa (k : kappa) : Hiptypes.kappa =
   match k with
   | EmptyHeap -> Hiptypes.EmptyHeap
   | PointsTo (x, t) -> Hiptypes.PointsTo (x, untype_term t)
+  | RecordPointsTo (x, fields) ->
+      Hiptypes.RecordPointsTo (x, List.map (fun (name, t) -> (name, untype_term t)) fields)
   | SepConj (k1, k2) -> Hiptypes.SepConj (untype_kappa k1, untype_kappa k2)
 and untype_core_lang (c : core_lang) : Hiptypes.core_lang =
   match c.core_desc with
@@ -79,6 +83,10 @@ and untype_core_lang (c : core_lang) : Hiptypes.core_lang =
       CShift (is_shift, ident_of_binder x, untype_core_lang body)
   | CReset e -> CReset (untype_core_lang e)
   | CSequence (s1, s2) -> CSequence (untype_core_lang s1, untype_core_lang s2)
+  (* Record operations *)
+  | CRecord fields -> CRecord (List.map (fun (name, value) -> (name, untype_core_lang value)) fields)
+  | CGetField (record, field) -> CGetField (untype_core_lang record, field)
+  | CSetField (record, field, value) -> CSetField (untype_core_lang record, field, untype_core_lang value)
 and untype_handler_ops (ops : core_handler_ops) : Hiptypes.core_handler_ops =
   List.map (fun (label, k_opt, spec, body) -> (label, k_opt, Option.map untype_staged_spec spec, untype_core_lang body)) ops
 and untype_pattern (pat : pattern) : Hiptypes.pattern =

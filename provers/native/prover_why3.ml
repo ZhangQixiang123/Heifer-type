@@ -303,6 +303,7 @@ module LowLevel = struct
       Ty.ty_int
     | Arrow (t1, t2) -> Ty.ty_func (type_to_why3 env t1) (type_to_why3 env t2)
     | TConstr _ -> failwith "general ADTs not implemented"
+    | TRecord _ -> failwith "Inline record types not implemented in Why3"
 
   let rec term_to_why3 env (t : term) =
     (* Format.printf "term %s@." (Pretty.string_of_term t); *)
@@ -467,6 +468,8 @@ module LowLevel = struct
     | BinOp (TTimes, _, _) -> failwith "TTimes nyi"
     | BinOp (TDiv, _, _) -> failwith "TDiv nyi"
     | TTuple _ -> failwith "TTupple nyi"
+    | TRecordTerm _ -> failwith "TRecordTerm not yet supported"
+    | TGetField _ -> failwith "TGetField not yet supported"
     | Const (TStr _) -> failwith "TStr nyi"
     | Construct _ -> failwith "constructors not yet supported"
 
@@ -565,6 +568,9 @@ module LowLevel = struct
     | CResume _ -> failwith "unimplemented CResume"
     | CLambda (_, _, _) -> failwith "unimplemented CLambda"
     | CShift _ | CReset _ -> failwith "TODO shift and reset expr_to_why3 "
+    | CRecord _ -> failwith "unimplemented CRecord"
+    | CGetField (_, _) -> failwith "unimplemented CGetField"
+    | CSetField (_, _, _) -> failwith "unimplemented CSetField"
 
   let pure_fn_to_logic_fn env pure_fn =
     let params =
@@ -765,6 +771,7 @@ let rec type_to_whyml t =
   | TVar v -> PTtyvar (ident v)
   | Arrow (t1, t2) -> PTarrow (type_to_whyml t1, type_to_whyml t2)
   | TConstr (name, args) -> PTtyapp (qualid [name], List.map type_to_whyml args)
+  | TRecord _ -> failwith "Inline record types not implemented in WhyML"
 
 let rec term_to_whyml t =
   match Typedhip.(t.term_desc) with
@@ -833,10 +840,12 @@ let rec term_to_whyml t =
     term (Tident (qualid [name]))
   | Construct (name, args) ->
       tapp (qualid [name]) (List.map term_to_whyml args)
-  | TTuple _ | BinOp (TPower, _, _) | BinOp (TDiv, _, _) | Const (TStr _) 
+  | TTuple _ | BinOp (TPower, _, _) | BinOp (TDiv, _, _) | Const (TStr _)
     ->
     failwith "nyi"
-  |Type _ -> failwith "to be implemented"
+  | TRecordTerm _ -> failwith "TRecordTerm not yet supported"
+  | TGetField _ -> failwith "TGetField not yet supported"
+  | Type _ -> failwith "to be implemented"
   
 
 and vars_to_params vars =
@@ -905,6 +914,7 @@ and core_lang_to_whyml e =
   | CWrite (_, _) | CRef _ | CRead _ -> failwith "heap operations not allowed"
   | CResume _ | CPerform (_, _) -> failwith "effects not allowed"
   | CShift _ | CReset _ -> failwith "TODO shift and reset core_lang_to_whyml "
+  | CRecord _ | CGetField (_, _) | CSetField (_, _, _) -> failwith "record operations not allowed"
 
 and pi_to_whyml p =
   match p with

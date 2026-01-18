@@ -418,6 +418,49 @@ let rec forward (env: fvenv) (expr : core_lang): staged_spec * fvenv =
             {env with fv_lambda_obl = obl :: env.fv_lambda_obl}
       in
       NormalReturn (res_eq lambda_term, EmptyHeap), env
+  | CRecord fields ->
+      (* Allocate a record on the heap with named fields *)
+      let loc_var = fresh_variable ~v:"rec" () in
+      let loc = (loc_var, expr.core_type) in
+      (* Evaluate each field expression to a term *)
+      let field_terms = List.map (fun (field_name, field_expr) ->
+        match field_expr.core_desc with
+        | CValue v -> (field_name, v)
+        | _ ->
+            (* For complex expressions, use a fresh variable *)
+            let field_var = fresh_variable ~v:("field_" ^ field_name) () in
+            (field_name, var ~typ:field_expr.core_type field_var)
+      ) fields in
+      (* Create spec: allocate record and return pointer to it *)
+      Exists (loc,
+              NormalReturn (res_eq (var_of_binder loc),
+                            RecordPointsTo (loc_var, field_terms))), env
+  | CGetField (record_expr, field_name) ->
+      (* Read a field from a heap-allocated record *)
+      let record_spec, env = forward env record_expr in
+      let loc_var = fresh_variable ~v:"rec" () in
+      let field_value_var = fresh_variable ~v:("val_" ^ field_name) () in
+      let field_value = var ~typ:expr.core_type field_value_var in
+      (* We need to generate a RecordPointsTo with a placeholder for all fields *)
+      (* For now, use a simpler approach: just require the record exists and return field *)
+      let get_field_term = {
+        term_desc = TGetField (var ~typ:record_expr.core_type loc_var, field_name);
+        term_type = expr.core_type
+      } in
+      Bind ((loc_var, record_expr.core_type), record_spec,
+            NormalReturn (res_eq get_field_term, EmptyHeap)), env
+  | CSetField (record_expr, field_name, value_expr) ->
+      (* Mutate a field in a heap-allocated record *)
+      let record_spec, env = forward env record_expr in
+      let value_spec, env = forward env value_expr in
+      let loc_var = fresh_variable ~v:"rec" () in
+      let value_var = fresh_variable ~v:"val" () in
+      let unit_term = { term_desc = Const ValUnit; term_type = Unit } in
+      (* Sequence: evaluate record, evaluate value, perform mutation *)
+      (* For now, simplified: just sequence the operations and return unit *)
+      Bind ((loc_var, record_expr.core_type), record_spec,
+            Bind ((value_var, value_expr.core_type), value_spec,
+                  NormalReturn (res_eq unit_term, EmptyHeap))), env
   | CShift (nz, k, expr_body) ->
       let spec_body, env = forward env expr_body in
       let x = Variables.fresh_variable ~v:"x" "continuation argument" in

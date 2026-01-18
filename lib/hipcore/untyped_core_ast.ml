@@ -60,6 +60,8 @@ and term =
   (* The string seems to be redundant here and I think we should remove it if possible *)
   | TLambda of string * string list * staged_spec option * core_lang option
   | TTuple of term list
+  | TRecordTerm of (string * term) list (* Record value with named fields *)
+  | TGetField of term * string (* Field projection: record.field *)
   | Type of ty
 (* (Label n) _k (*@ spec @*) -> e *)
 and core_handler_ops = (string * string option * staged_spec option * core_lang) list
@@ -98,6 +100,10 @@ and core_lang =
   | CLambda of string list * staged_spec option * core_lang
   | CShift of bool * string * core_lang (* bool=true is for shift, and bool=false for shift0 *)
   | CReset of core_lang
+  (* Record operations *)
+  | CRecord of (string * core_lang) list  (* field_name, field_value pairs - values can be any expression *)
+  | CGetField of core_lang * string       (* record expression, field_name *)
+  | CSetField of core_lang * string * core_lang  (* record expression, field_name, new_value - all can be any expression *)
 
 (* an occurrence of an effect *)
 and instant = string * term list
@@ -117,6 +123,7 @@ and kappa =
   | EmptyHeap
     (* x -> -   means x is allocated, and - is encoded as Var "_" *)
   | PointsTo of string * term
+  | RecordPointsTo of string * (string * term) list (* loc -> {field1: val1, field2: val2, ...} *)
   | SepConj of kappa * kappa
   (*| MagicWand of kappa * kappa*)
 

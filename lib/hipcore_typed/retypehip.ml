@@ -27,6 +27,8 @@ let rec retype_term (term : Hiptypes.term) =
                Option.map retype_core_lang body)
   | Hiptypes.Construct (name, args) -> Construct (name, List.map retype_term args)
   | Hiptypes.TTuple ts -> TTuple (List.map retype_term ts)
+  | Hiptypes.TRecordTerm fields -> TRecordTerm (List.map (fun (name, t) -> (name, retype_term t)) fields)
+  | Hiptypes.TGetField (record, field) -> TGetField (retype_term record, field)
   | Hiptypes.Type t -> Type t
   in
   { term_desc; term_type = Types.new_type_var () }
@@ -46,6 +48,8 @@ and retype_kappa (kappa : Hiptypes.kappa) =
   match kappa with
   | Hiptypes.EmptyHeap -> EmptyHeap
   | Hiptypes.PointsTo (loc, value) -> PointsTo (loc, retype_term value)
+  | Hiptypes.RecordPointsTo (loc, fields) ->
+      RecordPointsTo (loc, List.map (fun (name, t) -> (name, retype_term t)) fields)
   | Hiptypes.SepConj (k1, k2) -> SepConj (retype_kappa k1, retype_kappa k2)
 and retype_instant ((name, args) : Hiptypes.instant) = (name, List.map retype_term args)
 and retype_handlingcases (((default_var, default_spec), effects) : Hiptypes.handlingcases) : handlingcases =
@@ -106,6 +110,10 @@ and retype_core_lang (core_lang : Hiptypes.core_lang) : core_lang =
   | Hiptypes.CLambda (args, spec, body) -> CLambda (List.map binder_of_ident args, Option.map retype_staged_spec spec, retype_core_lang body)
   | Hiptypes.CShift _ | Hiptypes.CReset _ -> failwith "TODO"
   | Hiptypes.CSequence (s1, s2) -> CSequence (retype_core_lang s1, retype_core_lang s2)
+  (* Record operations *)
+  | Hiptypes.CRecord fields -> CRecord (List.map (fun (name, value) -> (name, retype_core_lang value)) fields)
+  | Hiptypes.CGetField (record, field) -> CGetField (retype_core_lang record, field)
+  | Hiptypes.CSetField (record, field, value) -> CSetField (retype_core_lang record, field, retype_core_lang value)
   in
   {core_desc; core_type = Types.new_type_var ()}
 let retype_state ((pi, kappa) : Hiptypes.state) : state = (retype_pi pi, retype_kappa kappa)

@@ -66,6 +66,8 @@ and term_desc =
   | TLambda of string * binder list * staged_spec option * core_lang option
   (* unused *)
   | TTuple of term list
+  | TRecordTerm of (string * term) list (* Record value with named fields: {x: 10, y: 20} *)
+  | TGetField of term * string (* Field projection: record.field *)
   | Type of ty
 and term =
   {
@@ -119,6 +121,10 @@ and core_lang_desc =
   | CLambda of binder list * staged_spec option * core_lang
   | CShift of bool * binder * core_lang (* bool=true is for shift, and bool=false for shift0 *)
   | CReset of core_lang
+  (* Record operations *)
+  | CRecord of (string * core_lang) list  (* field_name, field_value pairs - values can be any expression *)
+  | CGetField of core_lang * string       (* record expression, field_name *)
+  | CSetField of core_lang * string * core_lang  (* record expression, field_name, new_value - all can be any expression *)
 
 and core_lang =
   {core_desc: core_lang_desc;
@@ -143,6 +149,7 @@ and kappa =
   (* x -> -   means x is allocated, and - is encoded as Var "_" *)
   (* TODO should PointsTo use binders instead of strings...? *)
   | PointsTo of string * term
+  | RecordPointsTo of string * (string * term) list (* loc -> {field1: val1, field2: val2, ...} *)
   | SepConj of kappa * kappa
   (*| MagicWand of kappa * kappa*)
 
@@ -180,7 +187,7 @@ and staged_spec =
   | Multi of staged_spec * staged_spec
   | Assume of staged_spec
 (* copied here so visitors can be generated *)
-and typ = Types.typ = 
+and typ = Types.typ =
   | Any
   | Unit
   | Int
@@ -189,6 +196,7 @@ and typ = Types.typ =
   | Lamb
   | Arrow of typ * typ
   | TConstr of string * typ list
+  | TRecord of (string * typ) list
   | TVar of string
 
 

@@ -586,19 +586,16 @@ let rec translate_expr ctx json continuation =
 
   | "PropertyAccessExpression" ->
       (* Object field access: obj.field *)
-      let obj_json = json |> member "expression" in
-      let property_name = json |> member "name" |> get_identifier in
-
-      (* Check if object is a simple identifier *)
-      (match get_kind obj_json with
-       | "Identifier" ->
-           let obj_name = get_identifier obj_json in
-           let field_ref_name = obj_name ^ "_" ^ property_name in
-           { core_desc = CRead field_ref_name;
+      (* PropertyAccessExpression has children: [object, property] *)
+      let children = json |> member "children" |> to_list in
+      (match children with
+       | [obj_json; prop_json] ->
+           let property_name = get_identifier prop_json in
+           let obj_expr = translate_expr ctx obj_json continuation in
+           (* CGetField now takes core_lang, so we can pass the expression directly *)
+           { core_desc = CGetField (obj_expr, property_name);
              core_type = Any }
-       | _ ->
-           (* Complex object expression - not supported yet *)
-           failwith "PropertyAccessExpression on complex objects not supported")
+       | _ -> failwith "PropertyAccessExpression must have exactly 2 children")
 
   | "ConditionalExpression" ->
       (* Handle ternary operator: condition ? then_expr : else_expr *)
@@ -614,8 +611,25 @@ let rec translate_expr ctx json continuation =
        | _ -> failwith "ConditionalExpression must have 5 children")
 
   | "ObjectLiteralExpression" ->
-      (* For now, skip object literals - they need record type support *)
-      failwith "Object literals not yet supported - use simpler examples"
+      (* Object literal: { field1: val1, field2: val2, ... } *)
+      let properties = json |> member "children" |> to_list in
+
+      (* Translate each property - field values can now be any expression *)
+      let translate_field prop =
+        (* PropertyAssignment has children: [name, value] *)
+        let children = prop |> member "children" |> to_list in
+        match children with
+        | [name_json; value_json] ->
+            let field_name = get_identifier name_json in
+            (* Use translate_expr since field values can be any expression, including nested records *)
+            let field_expr = translate_expr ctx value_json continuation in
+            (field_name, field_expr)
+        | _ -> failwith "PropertyAssignment must have exactly 2 children"
+      in
+
+      let fields = List.map translate_field properties in
+      { core_desc = CRecord fields;
+        core_type = Any }
 
   | "ParenthesizedExpression" ->
       (* Parentheses are just for grouping, unwrap and translate the inner expression *)
@@ -676,19 +690,37 @@ let rec translate_expr ctx json continuation =
   | kind -> failwith ("Unsupported expression: " ^ kind)
 
 and translate_assignment ctx lhs rhs continuation =
-  let name = get_identifier lhs in
-  let variance = get_variance ctx name in
+  match get_kind lhs with
+  | "Identifier" ->
+      (* Variable assignment *)
+      let name = get_identifier lhs in
+      let variance = get_variance ctx name in
 
-  (* Verify variance: only mutable vars can be assigned *)
-  if variance <> Mutable then
-    failwith (Printf.sprintf "Cannot assign to immutable variable: %s" name);
+      (* Verify variance: only mutable vars can be assigned *)
+      if variance <> Mutable then
+        failwith (Printf.sprintf "Cannot assign to immutable variable: %s" name);
 
-  let rhs_expr = translate_expr ctx rhs continuation in
-  (* Use maybe_var to handle complex RHS expressions *)
-  maybe_var (fun rhs_term ->
-    { core_desc = CWrite (name, rhs_term);
-      core_type = Unit }
-  ) rhs_expr
+      let rhs_expr = translate_expr ctx rhs continuation in
+      (* Use maybe_var to handle complex RHS expressions *)
+      maybe_var (fun rhs_term ->
+        { core_desc = CWrite (name, rhs_term);
+          core_type = Unit }
+      ) rhs_expr
+
+  | "PropertyAccessExpression" ->
+      (* Field assignment: obj.field = value *)
+      let children = lhs |> member "children" |> to_list in
+      (match children with
+       | [obj_json; prop_json] ->
+           let field_name = get_identifier prop_json in
+           let obj_expr = translate_expr ctx obj_json continuation in
+           let rhs_expr = translate_expr ctx rhs continuation in
+           (* CSetField now takes core_lang for both arguments *)
+           { core_desc = CSetField (obj_expr, field_name, rhs_expr);
+             core_type = Unit }
+       | _ -> failwith "PropertyAccessExpression must have exactly 2 children")
+
+  | kind -> failwith ("Unsupported assignment target: " ^ kind)
 
 and translate_compound_assignment ctx op_str lhs rhs _continuation =
   let name = get_identifier lhs in

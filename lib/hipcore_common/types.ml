@@ -17,6 +17,7 @@ type typ =
   (* TODO do we need a Poly variant for generics? *)
   | Arrow of typ * typ
   | TConstr of string * typ list
+  | TRecord of (string * typ) list (* Anonymous/structural record type: {field1: typ1, field2: typ2, ...} *)
   | TVar of string (* this is last, so > concrete types *)
 
 [@@deriving show { with_path = false }, ord]
@@ -50,6 +51,8 @@ let rec instantiate_type_variables (vars: (typ * typ) list) (t : typ) : typ =
   match t with
   | TVar _ -> List.assoc_opt t vars |> Option.value ~default:t
   | TConstr (name, args) -> TConstr (name, List.map (instantiate_type_variables vars) args)
+  | TRecord fields -> TRecord (List.map (fun (name, typ) -> (name, instantiate_type_variables vars typ)) fields)
+  | Arrow (t1, t2) -> Arrow (instantiate_type_variables vars t1, instantiate_type_variables vars t2)
   | t -> t
 
 let min_typ a b = if compare_typ a b <= 0 then a else b
@@ -61,6 +64,7 @@ let rec free_type_vars t =
   | TVar v -> [v]
   | TConstr (_, args) -> (List.concat_map free_type_vars args)
   | Arrow (t1, t2) -> (free_type_vars t1) @ (free_type_vars t2)
+  | TRecord fields -> List.concat_map (fun (_, typ) -> free_type_vars typ) fields
   | _ -> []
 
 let rec params_of_arrow_type t =
@@ -132,20 +136,22 @@ module TEnv = struct
         then raise (Cyclic_type (t, simplified))
         (* Add s to the do-not-expand list, to prevent a cyclic expansion of s. *)
         else inner ~expanded:(SMap.add s t expanded) simplified
-      | TConstr (constr, args) -> 
+      | TConstr (constr, args) ->
           (* recurse into the constructor's arguments *)
           TConstr (constr, List.map (inner ~expanded:expanded) args)
       | Arrow (src, dst) ->
           Arrow (inner ~expanded:expanded src, inner ~expanded:expanded dst)
+      | TRecord fields ->
+          TRecord (List.map (fun (name, typ) -> (name, inner ~expanded:expanded typ)) fields)
       | _ -> t
     in
     inner t
 
   (** Fully resolve all type variables in t. Returns None
     if some variables cannot be resolved.*)
-  let rec concretize (m : t) t = 
+  let rec concretize (m : t) t =
     match t with
-    | TVar _ -> 
+    | TVar _ ->
       let equality = TMap.find_opt t !m |> Option.map U.get in
       Option.bind equality (fun equality ->
         match equality with
@@ -154,7 +160,7 @@ module TEnv = struct
         (* Otherwise, this may still be, e.g. a constructor with type variables inside, so
            recursively concretize this type. *)
         | _ -> (concretize m equality))
-    | TConstr (constr, args) -> 
+    | TConstr (constr, args) ->
         (* recurse into the constructor's arguments *)
         let concrete_args = List.map (concretize m) args in
         let concrete_args = List.fold_right (fun arg acc -> match arg, acc with
@@ -167,6 +173,20 @@ module TEnv = struct
         let* src = concretize m src in
         let* dst = concretize m dst in
         Some (Arrow (src, dst))
+    | TRecord fields ->
+        let (let*) f o = Option.bind f o in
+        (* Concretize each field type *)
+        let concrete_fields = List.map (fun (name, typ) ->
+          let* concrete_typ = concretize m typ in
+          Some (name, concrete_typ)
+        ) fields in
+        (* Check if all fields concretized successfully *)
+        let* all_fields = List.fold_right (fun field acc ->
+          match field, acc with
+          | None, _ | _, None -> None
+          | Some f, Some fs -> Some (f :: fs)
+        ) concrete_fields (Some []) in
+        Some (TRecord all_fields)
     | _ -> Some t
 
   (** Check if t is a fully concrete type. *)
@@ -184,6 +204,12 @@ let rec can_unify_with src dst =
   | TConstr (name1, args1), TConstr (name2, args2) when name1 = name2 ->
       List.length args1 = List.length args2
       && List.for_all2 can_unify_with args1 args2
+  | TRecord fields1, TRecord fields2 ->
+      (* Structural equality: same field names with compatible types *)
+      List.length fields1 = List.length fields2 &&
+      List.for_all2 (fun (n1, t1) (n2, t2) ->
+        n1 = n2 && can_unify_with t1 t2
+      ) fields1 fields2
   | _, _ -> false
 
 type abs_typ_env = {
