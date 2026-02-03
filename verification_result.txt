@@ -1,0 +1,131 @@
+Translating and verifying 5 function(s)
+
+Function 1: swap_case_spec_true
+------------------------------------------------------------
+
+Signature:
+  fun swap_case_spec_true(x: (<any>) ref, y: (<any>) ref) : unit
+
+Given Case Specification:
+  case [x, y] { x:Ref(A())/\y:Ref(A()) => r:(); x->Ref(a)*y->Ref(b) => x->Ref(b)*y->Ref(a)/\r:(); x->Ref(a)/\y:x => x->Ref(a)/\r:() }
+  (3 case branches)
+
+Body:
+  let tmp = !x in
+  let tmp1 = !y in
+  x := tmp1;
+  y := tmp;
+  ()
+
+Verification:
+  ✓ VERIFICATION PASSED
+  Result: true
+
+========== Function: swap_case_spec_true ==========
+error occurred: Failure("must provide specs") (set DEBUG env var for details)
+
+============================================================
+
+Function 2: swap_case_spec_true_2
+------------------------------------------------------------
+
+Signature:
+  fun swap_case_spec_true_2(x: (<any>) ref, y: (<any>) ref) : unit
+
+Given Case Specification:
+  case [x, y] { x->Ref(a)*y->Ref(b) => x->Ref(b)*y->Ref(a)/\r:(); x->Ref(a)/\y:x => x->Ref(a)/\r:() }
+  (2 case branches)
+
+Body:
+  let tmp = !x in
+  let tmp2 = !y in
+  x := tmp2;
+  y := tmp;
+  ()
+
+Verification:
+  ✗ VERIFICATION FAILED
+  Error: Incomplete case coverage: Missing pure type case for x and y. Need: x : Ref(A) /\ y : Ref(A)
+
+========== Function: swap_case_spec_true_2 ==========
+error occurred: Failure("must provide specs") (set DEBUG env var for details)
+
+============================================================
+
+Function 3: swap_case_spec_true_3
+------------------------------------------------------------
+
+Signature:
+  fun swap_case_spec_true_3(x: (<any>) ref, y: (<any>) ref) : unit
+
+Given Case Specification:
+  case [x, y] { x:Ref(A())/\y:Ref(A()) => r:() }
+  (1 case branches)
+
+Body:
+  let tmp = !x in
+  let tmp3 = !y in
+  x := tmp3;
+  y := tmp;
+  ()
+
+Verification:
+  ✗ VERIFICATION FAILED
+  Error: Incomplete case coverage: Missing separation cases for x and y. Need both: x -> Ref(a) * y -> Ref(b) AND x -> Ref(a) /\ y : x
+
+========== Function: swap_case_spec_true_3 ==========
+error occurred: Failure("must provide specs") (set DEBUG env var for details)
+
+============================================================
+
+Function 4: swap_case_spec_false
+------------------------------------------------------------
+
+Signature:
+  fun swap_case_spec_false(x: (<any>) ref, y: (<any>) ref) : unit
+
+Given Case Specification:
+  case [x, y] { x:Ref(A())/\y:Ref(A()) => r:(); x->Ref(a)*y->Ref(b) => x->Ref(b)*y->Ref(a)/\r:() }
+  (2 case branches)
+
+Body:
+  let tmp = !x in
+  let tmp4 = !y in
+  x := tmp4;
+  y := tmp;
+  ()
+
+Verification:
+  ✗ VERIFICATION FAILED
+  Error: Incomplete case coverage: Missing aliased case for x and y. Need: x -> Ref(a) /\ y : x
+
+========== Function: swap_case_spec_false ==========
+error occurred: Failure("must provide specs") (set DEBUG env var for details)
+
+============================================================
+
+Function 5: swap_case_spec_false_2
+------------------------------------------------------------
+
+Signature:
+  fun swap_case_spec_false_2(x: (<any>) ref, y: (<any>) ref) : unit
+
+Given Case Specification:
+  case [x, y] { x:Ref(A())/\y:Ref(A()) => r:(); x->Ref(a)/\y:x => x->Ref(a)/\r:() }
+  (2 case branches)
+
+Body:
+  let tmp = !x in
+  let tmp5 = !y in
+  x := tmp5;
+  y := tmp;
+  ()
+
+Verification:
+  ✗ VERIFICATION FAILED
+  Error: Incomplete case coverage: Missing separate case for x and y. Need: x -> Ref(a) * y -> Ref(b)
+
+========== Function: swap_case_spec_false_2 ==========
+error occurred: Failure("must provide specs") (set DEBUG env var for details)
+
+============================================================

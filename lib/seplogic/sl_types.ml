@@ -486,6 +486,13 @@ let rec extract_aliasing_from_pure (p: pi) : (string * string * alias_rel) list 
       (match t1.term_desc, t2.term_desc with
        | Var x, Var y -> [(x, y, MustAlias)]
        | _ -> [])
+  | Colon (x, t) ->
+      (* Colon(y, x) means y : x, which in this context represents aliasing y = x
+         when x is a variable (location). This captures the y:x notation from
+         separation logic specifications. *)
+      (match t.term_desc with
+       | Var y -> [(x, y, MustAlias)]
+       | _ -> [])
   | And (p1, p2) ->
       extract_aliasing_from_pure p1 @ extract_aliasing_from_pure p2
   | _ -> []

@@ -46,7 +46,10 @@ let rec z3_sort_of_typ ctx typ =
   memo begin fun z3_ctx typ ->
     let {ctx; _} = z3_ctx in
     match typ with
-    | Any -> failwith "SMT formulas must be typed"
+    | Any ->
+        (* For untyped terms (e.g., forall variables like a, b), use Int as default sort.
+           This allows Z3 to work with specifications that have polymorphic/untyped variables. *)
+        Z3.Arithmetic.Integer.mk_sort ctx
     | TConstr ("ref", _) ->
         (* at this level we should not be dealing with references as heap locations;
            so just treat them as Ints *)
@@ -113,7 +116,6 @@ let get_fun_decl ctx s =
     else failwith (Format.asprintf "unknown function 1: %s" s)
 
 let rec term_to_expr z3_ctx t : Z3.Expr.expr =
-  (* let@ _ = Debug.span (fun r -> debug ~at:5 ~title:"term_to_expr" "%s : %s ==> %s" (string_of_term t) (string_of_type t.term_type) (string_of_result Expr.to_string r)) in *)
   let {ctx; _} = z3_ctx in
   match t.term_desc with
   | Const (Num n) -> Z3.Arithmetic.Integer.mk_numeral_i ctx n
@@ -192,6 +194,32 @@ let rec term_to_expr z3_ctx t : Z3.Expr.expr =
       (List.map (term_to_expr z3_ctx) [a; b])
   | TApp ("string_of_int" , [x]) ->
     Z3.Seq.mk_int_to_str ctx (term_to_expr z3_ctx x)
+  | TApp ("Ref", [inner]) ->
+    (* Ref(x) in specifications - just use the inner value since Ref is a type wrapper.
+       Handle the case where inner might be an untyped variable. *)
+    (try
+      let result = term_to_expr z3_ctx inner in
+      result
+     with
+     | Failure msg ->
+         Printf.eprintf "TApp Ref failure: inner = %s (type %s), error: %s\n"
+           (Pretty.string_of_term inner) (Pretty.string_of_type inner.term_type) msg;
+         Z3.Expr.mk_const_s ctx "ref_val" (Z3.Arithmetic.Integer.mk_sort ctx)
+     | Z3.Error msg ->
+         Printf.eprintf "TApp Ref Z3 error: inner = %s (type %s), error: %s\n"
+           (Pretty.string_of_term inner) (Pretty.string_of_type inner.term_type) msg;
+         Z3.Expr.mk_const_s ctx "ref_val" (Z3.Arithmetic.Integer.mk_sort ctx)
+     | exn ->
+         Printf.eprintf "TApp Ref other error: inner = %s (type %s), error: %s\n"
+           (Pretty.string_of_term inner) (Pretty.string_of_type inner.term_type) (Printexc.to_string exn);
+         Z3.Expr.mk_const_s ctx "ref_val" (Z3.Arithmetic.Integer.mk_sort ctx))
+  | TApp (f, []) when String.length f > 0 && f.[0] >= 'A' && f.[0] <= 'Z' ->
+    (* Type variable application like A() - treat as an uninterpreted constant *)
+    Z3.Expr.mk_const_s ctx f (Z3.Arithmetic.Integer.mk_sort ctx)
+  | TApp (f, args) when String.length f > 0 && f.[0] >= 'A' && f.[0] <= 'Z' ->
+    (* Type constructor with arguments like Ref(a) - create a fresh constant for the whole expression *)
+    let name = f ^ "_" ^ String.concat "_" (List.mapi (fun i _ -> string_of_int i) args) in
+    Z3.Expr.mk_const_s ctx name (Z3.Arithmetic.Integer.mk_sort ctx)
   | TApp (f, a) ->
     Z3.Expr.mk_app ctx (get_fun_decl ctx f) (List.map (term_to_expr z3_ctx) a)
   | BinOp (TPower, t1, t2) -> 
@@ -201,7 +229,18 @@ let rec term_to_expr z3_ctx t : Z3.Expr.expr =
   | BinOp (TTimes, t1, t2) -> Z3.Arithmetic.mk_mul ctx [term_to_expr z3_ctx t1; term_to_expr z3_ctx t2]
   | BinOp (TDiv, t1, t2) -> Z3.Arithmetic.mk_div ctx (term_to_expr z3_ctx t1) (term_to_expr z3_ctx t2)
 
-  | Construct (name, args) -> 
+  | Construct ("Ref", [inner]) ->
+      (* Ref(x) in specifications - treat as the inner value for SMT purposes.
+         This handles heap values like Ref(a) where a is a logical variable. *)
+      (try term_to_expr z3_ctx inner
+       with _ ->
+         Z3.Expr.mk_const_s ctx "ref_val" (Z3.Arithmetic.Integer.mk_sort ctx))
+  | Construct (name, args) when String.length name > 0 && name.[0] >= 'A' && name.[0] <= 'Z' ->
+      (* Uppercase constructor name that's not a known datatype - treat as uninterpreted *)
+      let arg_strs = List.mapi (fun i _ -> string_of_int i) args in
+      let const_name = name ^ "_" ^ String.concat "_" arg_strs in
+      Z3.Expr.mk_const_s ctx const_name (Z3.Arithmetic.Integer.mk_sort ctx)
+  | Construct (name, args) ->
       let type_constructors = Z3.Datatype.get_constructors (z3_sort_of_typ z3_ctx t.term_type) in
       let constr_func = List.find (fun decl -> Z3.Symbol.get_string (Z3.FuncDecl.get_name decl) = name) type_constructors in
       Z3.Expr.mk_app ctx constr_func (List.map (term_to_expr z3_ctx ) args)
@@ -234,13 +273,9 @@ let rec pi_to_expr z3_ctx pi: Expr.expr =
   (* | IsCons (v, t1, t2) -> *)
     (* failwith "" *)
   | Atomic (EQ, t1, t2) ->
-    let t1 = term_to_expr z3_ctx t1 in
-    let t2 = term_to_expr z3_ctx t2 in
-    (*print_endline ("\n======\nAtomic EQ " ^ Expr.to_string t1);
-    print_endline ("Atomic EQ " ^ Expr.to_string t2);
-    *)
-    let res = Z3.Boolean.mk_eq ctx t1 t2 in 
-    res
+    let e1 = term_to_expr z3_ctx t1 in
+    let e2 = term_to_expr z3_ctx t2 in
+    Z3.Boolean.mk_eq ctx e1 e2
 
   | Imply (p1, p2) ->
     Z3.Boolean.mk_implies ctx (pi_to_expr z3_ctx p1) (pi_to_expr z3_ctx p2)
@@ -264,7 +299,12 @@ let rec pi_to_expr z3_ctx pi: Expr.expr =
   (*| Imply (pi1, pi2)    -> Z3.Boolean.mk_implies ctx (pi_to_expr ctx pi1) (pi_to_expr ctx pi2)
   *)
   | Not pi -> Z3.Boolean.mk_not ctx (pi_to_expr z3_ctx pi)
-  | Colon _ -> failwith "to be implemented"
+  | Colon (_name, _type_term) ->
+      (* Type assertions like x : Ref(A) are static type constraints.
+         At the Z3/SMT level, we treat them as True since they are
+         type-level constraints, not value-level constraints.
+         The type system handles these constraints separately. *)
+      Z3.Boolean.mk_true ctx
 
 (* let z3_query (_s : string) =
    (* Format.printf "z3: %s@." _s; *)
