@@ -42,7 +42,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const ts = __importStar(require("typescript"));
 const fs = __importStar(require("fs"));
 /**
- * Extracts JSDoc comments from a node, looking for @requires and @ensures tags.
+ * Extracts JSDoc comments from a node, looking for @requires, @ensures,
+ * @case, and @params tags (for case-based specifications).
  */
 function serializeJSDoc(node, sourceFile) {
     const jsDocTags = ts.getJSDocTags(node);
@@ -50,6 +51,7 @@ function serializeJSDoc(node, sourceFile) {
         return null;
     }
     const result = {};
+    const cases = [];
     for (const tag of jsDocTags) {
         const tagName = tag.tagName.text;
         const tagComment = typeof tag.comment === 'string'
@@ -62,6 +64,22 @@ function serializeJSDoc(node, sourceFile) {
         if (tagName === 'require' || tagName === 'ensure') {
             result[tagName] = tagComment.trim();
         }
+        else if (tagName === 'case') {
+            // Collect case branches for case-based specifications
+            cases.push(tagComment.trim());
+        }
+        else if (tagName === 'params') {
+            // Parameters for case specifications
+            result['params'] = tagComment.trim();
+        }
+        else if (tagName === 'forall') {
+            // Universal quantification: @forall A, a, b
+            result['forall'] = tagComment.trim();
+        }
+    }
+    // Add cases array if any @case tags were found
+    if (cases.length > 0) {
+        result['cases'] = cases;
     }
     return Object.keys(result).length > 0 ? result : null;
 }
@@ -200,6 +218,15 @@ function serializeNode(node, sourceFile) {
         case ts.SyntaxKind.TrueKeyword:
         case ts.SyntaxKind.FalseKeyword:
             // These just need their kind
+            break;
+        case ts.SyntaxKind.TypeReference:
+            const typeRef = node;
+            // Get the type name (e.g., "Ref", "Array", "Point")
+            result.typeName = serializeNode(typeRef.typeName, sourceFile);
+            // Get type arguments if present (e.g., [number] for Ref<number>)
+            if (typeRef.typeArguments && typeRef.typeArguments.length > 0) {
+                result.typeArguments = typeRef.typeArguments.map(arg => serializeNode(arg, sourceFile));
+            }
             break;
         default:
             // For unsupported nodes, try to recursively serialize children

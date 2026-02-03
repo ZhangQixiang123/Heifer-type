@@ -168,18 +168,80 @@ let infer_spec (prog : core_program) (meth : meth_def) =
   let inferred, _ = forward fv_env meth.m_body in
   inferred
 
-let check_method prog inferred given =
+(** Try to verify a method using the new seplogic system.
+    Returns Some(result) if verification was attempted, None if not applicable. *)
+let try_seplogic_verify (prog : core_program) (meth : meth_def) (given_spec : staged_spec) : bool option =
+  let open Seplogic in
+  try
+    (* Translate declared spec to sl_spec_disj (supports disjunction in declared specs) *)
+    let declared_sl = Sl_types.sl_spec_disj_of_staged given_spec in
+    debug ~at:2 ~title:"try_seplogic" "Declared spec translated to sl_spec_disj";
+
+    (* Convert methods list to map *)
+    let methods_map = List.fold_left
+      (fun acc m -> SMap.add m.m_name m acc)
+      SMap.empty prog.cp_methods in
+
+    (* Create forward verification environment *)
+    let env = Sl_forward.create_env methods_map prog.cp_predicates in
+
+    (* Run forward verification on the method body *)
+    match Sl_forward.sl_forward env meth.m_body with
+    | Sl_forward.SL_Unsupported msg ->
+        debug ~at:2 ~title:"try_seplogic" "Body not supported: %s" msg;
+        None  (* Fall back to other methods *)
+    | Sl_forward.SL_Spec inferred_sl ->
+        debug ~at:2 ~title:"try_seplogic" "Inferred: %s" (Sl_types.string_of_sl_spec_disj inferred_sl);
+        debug ~at:2 ~title:"try_seplogic" "Declared: %s" (Sl_types.string_of_sl_spec_disj declared_sl);
+
+        (* Check entailment with disjunction support on both sides *)
+        let result = match Sl_entail.check_sl_entailment_disj_safe inferred_sl declared_sl with
+          | Sl_entail.Valid -> true
+          | Sl_entail.Invalid reason ->
+              debug ~at:2 ~title:"try_seplogic" "Entailment failed: %s" reason;
+              false
+        in
+        Some result
+  with Sl_types.Unsupported_feature msg ->
+    debug ~at:2 ~title:"try_seplogic" "Spec not supported: %s" msg;
+    None
+
+let check_method prog meth inferred given =
   match given with
   | None -> true
   | Some given_spec ->
-    let open Hipprover.Entail in
-    (* likely that we need some env or extra setup later *)
-    let pctx = create_pctx prog in
-    check_staged_spec_entailment pctx inferred given_spec
+    (* Try seplogic system first for clean separation logic specs *)
+    (match try_seplogic_verify prog meth given_spec with
+     | Some result ->
+         debug ~at:2 ~title:"check_method" "Using seplogic path: %b" result;
+         result
+     | None ->
+         (* Try simple_entail next for specs that fit the simple pattern (req;ens). *)
+         let try_simple_entail () =
+           let open Hipprover.Simple_entail in
+           match simple_of_staged given_spec, simple_of_staged inferred with
+           | Some given_simple, Some inferred_simple ->
+               debug ~at:2 ~title:"check_method" "Using simple_entail path";
+               (match check_simple_spec_entailment inferred_simple given_simple with
+                | Valid -> Some true
+                | Invalid reason ->
+                    debug ~at:2 ~title:"check_method simple failed" "%s" reason;
+                    Some false)
+           | _ ->
+               debug ~at:2 ~title:"check_method" "Specs not simple, using staged entail";
+               None
+         in
+         match try_simple_entail () with
+         | Some result -> result
+         | None ->
+             (* Fall back to staged_spec entailment *)
+             let open Hipprover.Entail in
+             let pctx = create_pctx prog in
+             check_staged_spec_entailment pctx inferred given_spec)
 
 let infer_and_check_method (prog : core_program) (meth : meth_def) (given_spec : staged_spec option) =
   let inferred_spec = infer_spec prog meth in
-  let result = check_method prog inferred_spec given_spec in
+  let result = check_method prog meth inferred_spec given_spec in
   inferred_spec, result
 
 let choose_spec (inferred_spec : staged_spec) (given_spec : staged_spec option) =
@@ -213,52 +275,31 @@ let analyze_method (prog : core_program) (meth : meth_def) : core_program =
   in 
   let multi_spec = spec_list initial_spec in 
 
-  let process sp need_verify = 
-  let _r = 
-     if need_verify then 
+  let process sp need_verify =
+  let _r =
+     if need_verify then
         let open Hipprover.Forward_rules in
   (* print_endline (string_of_staged_spec sp); *)
-        (analyze_type_spec sp meth prog) else 
+        (try analyze_type_spec sp meth prog with _ -> sp)
+     else
         sp
         in
   
   (* let cp_predicates = SMap.add meth.m_name sp prog.cp_predicates in *)
   (* let () =  failwith "dddd" in *)
-  (* let inferred_spec, result =
-    infer_and_check_method prog meth given_spec
+  let inferred_spec, result =
+    infer_and_check_method prog meth (Some sp)
   in
-  (* after infference, if the method does not have a spec, then add
+  (* after inference, if the method does not have a spec, then add
      the inferred spec into the method? *)
-
-  let choosen_spec = choose_spec inferred_spec given_spec in
-  let updated_meth = {meth with m_spec = Some choosen_spec} in
-  (* we always add the method into the program, regardless of whether it is verified or not? *)
-  let prog = {prog with cp_methods = updated_meth :: prog.cp_methods} in
-  let prog =
-    (* let@ _ = Globals.Timing.(time overall) in *)
-    if not result then prog
-    else begin
-      let@ _ = Debug.span (fun _ -> debug
-        ~at:2
-        ~title:(Format.asprintf "remembering predicate for %s" meth.m_name)
-        "")
-      in
-      let pred = Hipprover.Entail.derive_predicate meth.m_name 
-      meth.m_params
-      inferred_spec in
-      (* let pred = todo () in *)
-      let cp_predicates = SMap.add meth.m_name pred prog.cp_predicates in
-      {prog with cp_predicates}
-      (* prog *)
-    end
-  in *)
+  let _choosen_spec = choose_spec inferred_spec (Some sp) in
   (* potentially report the normalized spec as well. Refactor *)
-  
+
   report_result
     ~kind:"Function"
     ~name:meth.m_name
     ~given_spec: (Some sp)
-    ~result:true; 
+    ~result:result; 
     in
   (
     match initial_spec with | Assume _ ->
@@ -372,8 +413,6 @@ let process_intermediates (it : Typedhip.intermediate) prog : binder list * core
       (* [], { prog with cp_sl_predicates = SMap.add p.p_sl_name p prog.cp_sl_predicates } *)
       todo ()
   | Meth (m_name, m_params, m_spec, m_body, m_tactics, pure_fn_info) ->
-      
-      
       let meth : meth_def = {m_name; m_params; m_spec; m_body; m_tactics} in
       process_pure_fn_info meth pure_fn_info;
       let@ _ = Debug.span (fun _ ->
@@ -382,6 +421,28 @@ let process_intermediates (it : Typedhip.intermediate) prog : binder list * core
       let prog = analyze_method prog meth in
       let function_type = List.fold_right (fun e acc -> Arrow (e, acc)) (List.map type_of_binder m_params) m_body.core_type in
       [m_name, function_type], prog
+  | SimpleMeth (sm_name, sm_params, sm_spec, sm_body) ->
+      (* Process method with simple separation logic spec *)
+      let simple_meth : simple_meth_def = {sm_name; sm_params; sm_spec; sm_body} in
+      let@ _ = Debug.span (fun _ ->
+        debug ~at:1 ~title:(Format.asprintf "verifying simple method: %s" simple_meth.sm_name) "")
+      in
+      (* Verify simple spec using forward verification and entailment *)
+      let open Hipprover.Forward_rules in
+      let method_env = prog.cp_methods
+        |> List.filter (fun m -> sm_params |> List.assoc_opt m.m_name |> Option.is_some)
+        |> List.map (fun m -> m.m_name, m)
+        |> SMap.of_list
+      in
+      let pred_env = prog.cp_predicates in
+      let fv_env = create_fv_env method_env pred_env in
+      let result = verify_simple_method fv_env simple_meth in
+      (* Convert simple_spec to staged_spec for reporting *)
+      let given_spec_as_staged = Option.map Hipprover.Simple_entail.staged_of_simple sm_spec in
+      report_result ~kind:"simple" ~name:sm_name ~given_spec:given_spec_as_staged ~result;
+      let prog = { prog with cp_simple_methods = simple_meth :: prog.cp_simple_methods } in
+      let function_type = List.fold_right (fun e acc -> Arrow (e, acc)) (List.map type_of_binder sm_params) sm_body.core_type in
+      [sm_name, function_type], prog
 
 let process_ocaml_structure (items: Ocaml_common.Typedtree.structure) : unit =
   

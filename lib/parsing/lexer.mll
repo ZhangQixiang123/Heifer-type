@@ -108,6 +108,10 @@ rule token = parse
       { LBRACKET }
   | "]"
       { RBRACKET }
+  | "{"
+      { LBRACE }
+  | "}"
+      { RBRACE }
   | ";"
       { SEMI }
   | ","
@@ -144,6 +148,10 @@ rule token = parse
       { RESET }
   | "__"
       {TANY}
+  | "case"
+      { CASE }
+  | "=>"
+      { FATARROW }
   | eof
       { EOF }
   | '"'

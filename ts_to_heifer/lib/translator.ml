@@ -17,11 +17,13 @@ type variance = Mutable | Immutable
 type context = {
   variance_env: (string, variance) Hashtbl.t;  (* Variable name → variance *)
   type_env: (string, typ) Hashtbl.t;           (* Variable name → type *)
+  mutable type_params: string list;            (* Type parameters from function declaration *)
 }
 
 let create_context () = {
   variance_env = Hashtbl.create 16;
   type_env = Hashtbl.create 16;
+  type_params = [];
 }
 
 type scope_info = {
@@ -43,6 +45,28 @@ let get_type ctx name =
 let set_type ctx name typ =
   Hashtbl.replace ctx.type_env name typ
 
+(** Check if a variable name starts with uppercase (type variable) *)
+let is_type_var_name name =
+  String.length name > 0 &&
+  let first_char = name.[0] in
+  first_char >= 'A' && first_char <= 'Z'
+
+(** Extract type parameters from function declaration JSON *)
+let extract_type_params json =
+  try
+    let type_params_json = json |> member "typeParameters" |> to_list in
+    List.map (fun tp -> tp |> member "name" |> to_string) type_params_json
+  with _ -> []
+
+(** Parse forall variables, distinguishing type variables from value variables.
+    Type variables start with uppercase (A, B, C...).
+    Value variables start with lowercase (a, b, x, y...). *)
+let parse_forall_vars forall_str =
+  let vars = String.split_on_char ',' forall_str |> List.map String.trim in
+  let type_vars = List.filter is_type_var_name vars in
+  let value_vars = List.filter (fun v -> not (is_type_var_name v)) vars in
+  (type_vars, value_vars)
+
 let get_operator json =
   json |> member "operator" |> to_string
 
@@ -59,27 +83,129 @@ let get_spec_require json =
     failwith (Printf.sprintf "Failed to get 'require' from JSON: %s" (Yojson.Safe.to_string json))
 
 let get_spec_ensure json =
-  try 
+  try
     json |> member "jsdoc" |> member "ensure" |> to_string
   with Yojson.Safe.Util.Type_error _ ->
     failwith (Printf.sprintf "Failed to get 'ensure' from JSON: %s" (Yojson.Safe.to_string json))
+
+(** Get @case annotations from JSDoc if present *)
+let get_spec_cases json =
+  try
+    let cases = json |> member "jsdoc" |> member "cases" in
+    if cases = `Null then None
+    else Some (cases |> to_list |> List.map to_string)
+  with Yojson.Safe.Util.Type_error _ -> None
+
+(** Check if this function has case-based specification *)
+let has_case_spec json =
+  match get_spec_cases json with
+  | Some (_ :: _) -> true
+  | _ -> false
+
+(** Parse a single case branch: "precondition => postcondition" *)
+let parse_case_branch_str (s: string) : Hiptypes.case_branch =
+  let parse_state_from_string str =
+    let lexbuf = Lexing.from_string str in
+    Parser.parse_state Lexer.token lexbuf
+  in
+  (* Split on "=>" to get precondition and postcondition *)
+  let parts = Str.split (Str.regexp_string "=>") s in
+  match parts with
+  | [pre_str; post_str] ->
+      let pre = parse_state_from_string (String.trim pre_str) in
+      (* Post may have "ens" prefix, strip it *)
+      let post_str_clean =
+        let trimmed = String.trim post_str in
+        if String.length trimmed > 4 && String.sub trimmed 0 4 = "ens " then
+          String.sub trimmed 4 (String.length trimmed - 4)
+        else trimmed
+      in
+      let post = parse_state_from_string post_str_clean in
+      { Hiptypes.cb_pre = pre; cb_post = post }
+  | _ ->
+      failwith (Printf.sprintf "Invalid case branch format: %s (expected 'pre => post')" s)
+
+(** Parse case-based specification from JSDoc annotations.
+
+    Format:
+    @case pre1 => ens post1
+    @case pre2 => ens post2
+    ...
+
+    Or with params:
+    @params x, y
+    @case pre1 => ens post1
+*)
+let parse_case_spec json : Hiptypes.case_spec option =
+  match get_spec_cases json with
+  | None | Some [] -> None
+  | Some case_strs ->
+      (* Parse each case branch *)
+      let branches = List.map parse_case_branch_str case_strs in
+      (* Try to extract params from jsdoc *)
+      let params =
+        try
+          let params_str = json |> member "jsdoc" |> member "params" |> to_string in
+          String.split_on_char ',' params_str |> List.map String.trim
+        with _ -> []  (* No explicit params, will be inferred from function signature *)
+      in
+      (* Try to extract forall from jsdoc and distinguish type vs value variables *)
+      let (type_vars, value_vars) =
+        try
+          let forall_str = json |> member "jsdoc" |> member "forall" |> to_string in
+          parse_forall_vars forall_str
+        with _ -> ([], [])
+      in
+      Some {
+        Hiptypes.cs_type_vars = type_vars;   (* Type variables: A, B (uppercase) *)
+        cs_forall = value_vars;               (* Value variables: a, b (lowercase) *)
+        cs_params = params;
+        cs_branches = branches;
+      }
 
 let parse_to_hiptype json =
   let parse_state_from_string str =
     let lexbuf = Lexing.from_string str in
     Parser.parse_state Lexer.token lexbuf
   in
+  let parse_staged_spec_from_string str =
+    let lexbuf = Lexing.from_string str in
+    Parser.parse_staged_spec Lexer.token lexbuf
+  in
   (* Extract require and ensure from JSDoc annotations *)
   let require_str = get_spec_require json in
   let ensure_str = get_spec_ensure json in
-  (* Parse both using the Heifer parser *)
-  let (req_pi, req_kappa) = parse_state_from_string require_str in
-  let (ens_pi, ens_kappa) = parse_state_from_string ensure_str in
-  (* Build the specification *)
-  Hiptypes.Sequence (
-    Hiptypes.Require (req_pi, req_kappa),
-    Hiptypes.NormalReturn (ens_pi, ens_kappa)
-  )
+  (* Check if ensure contains disjunction - if so, parse as full spec *)
+  if String.contains ensure_str '\\' then begin
+    (* Parse ensure as full staged spec (supports disjunction with \/) *)
+    (* Each disjunct needs "ens " prefix: "a \/ b" -> "ens a \/ ens b" *)
+    (* Split on "\/" (the disjunction operator) *)
+    let rec split_disjunction s =
+      try
+        let idx = Str.search_forward (Str.regexp_string "\\/") s 0 in
+        let before = String.sub s 0 idx in
+        let after = String.sub s (idx + 2) (String.length s - idx - 2) in
+        before :: split_disjunction after
+      with Not_found -> [s]
+    in
+    let disjuncts = split_disjunction ensure_str in
+    let add_ens_prefix s = "ens " ^ String.trim s in
+    let full_spec_str = String.concat " \\/ " (List.map add_ens_prefix disjuncts) in
+    let ensure_spec = parse_staged_spec_from_string full_spec_str in
+    let (req_pi, req_kappa) = parse_state_from_string require_str in
+    Hiptypes.Sequence (
+      Hiptypes.Require (req_pi, req_kappa),
+      ensure_spec
+    )
+  end
+  else
+    (* Standard parsing: require and ensure as separate states *)
+    let (req_pi, req_kappa) = parse_state_from_string require_str in
+    let (ens_pi, ens_kappa) = parse_state_from_string ensure_str in
+    Hiptypes.Sequence (
+      Hiptypes.Require (req_pi, req_kappa),
+      Hiptypes.NormalReturn (ens_pi, ens_kappa)
+    )
 
 let get_identifier json =
   try
@@ -247,7 +373,7 @@ let is_assignment_op = function
   | "=" | "+=" | "-=" | "*=" | "/=" -> true
   | _ -> false
 
-let translate_type json =
+let rec translate_type json =
   try
     match get_kind json with
     | "NumberKeyword" -> Int
@@ -255,9 +381,38 @@ let translate_type json =
     | "BooleanKeyword" -> Bool
     | "VoidKeyword" -> Unit
     | "AnyKeyword" -> Any
-    | "TypeReference" -> Any  (* Generic types become Any for now *)
+    | "TypeReference" ->
+        (* Extract type name from typeName field *)
+        let type_name =
+          try json |> member "typeName" |> get_identifier
+          with _ ->
+            (* Fallback for old format with children *)
+            let children = try json |> member "children" |> to_list with _ -> [] in
+            match children with
+            | [name_json] -> (try get_identifier name_json with _ -> "")
+            | _ -> ""
+        in
+        (* Check for Ref<T> pattern *)
+        if type_name = "Ref" then
+          let type_args =
+            try json |> member "typeArguments" |> to_list
+            with _ -> []
+          in
+          match type_args with
+          | [inner_type_json] ->
+              let inner_type = translate_type inner_type_json in
+              TConstr ("ref", [inner_type])
+          | _ -> TConstr ("ref", [Any])  (* Ref without type arg *)
+        else
+          Any  (* Other type references become Any *)
     | _ -> Any  (* Default to Any for unknown types *)
   with _ -> Any  (* If any error, default to Any *)
+
+(** Check if a type is a ref type and return the inner type *)
+let is_ref_type typ =
+  match typ with
+  | TConstr ("ref", [inner]) -> Some inner
+  | _ -> None
 
 (** Convert Heifer type to Hiptypes ty for specifications *)
 let typ_to_ty t =
@@ -591,10 +746,36 @@ let rec translate_expr ctx json continuation =
       (match children with
        | [obj_json; prop_json] ->
            let property_name = get_identifier prop_json in
-           let obj_expr = translate_expr ctx obj_json continuation in
-           (* CGetField now takes core_lang, so we can pass the expression directly *)
-           { core_desc = CGetField (obj_expr, property_name);
-             core_type = Any }
+           (* Check if this is accessing .value on a Ref<T> type *)
+           if property_name = "value" then
+             (* Try to get the object's name and type *)
+             let obj_name_opt =
+               try Some (get_identifier obj_json)
+               with _ -> None
+             in
+             match obj_name_opt with
+             | Some obj_name ->
+                 let obj_type = get_type ctx obj_name in
+                 (match is_ref_type obj_type with
+                  | Some inner_type ->
+                      (* x.value on Ref<T> becomes CRead x (deref: !x) *)
+                      { core_desc = CRead obj_name;
+                        core_type = inner_type }
+                  | None ->
+                      (* Not a ref type, use regular field access *)
+                      let obj_expr = translate_expr ctx obj_json continuation in
+                      { core_desc = CGetField (obj_expr, property_name);
+                        core_type = Any })
+             | None ->
+                 (* Complex expression, use regular field access *)
+                 let obj_expr = translate_expr ctx obj_json continuation in
+                 { core_desc = CGetField (obj_expr, property_name);
+                   core_type = Any }
+           else
+             (* Non-.value property access *)
+             let obj_expr = translate_expr ctx obj_json continuation in
+             { core_desc = CGetField (obj_expr, property_name);
+               core_type = Any }
        | _ -> failwith "PropertyAccessExpression must have exactly 2 children")
 
   | "ConditionalExpression" ->
@@ -700,11 +881,15 @@ and translate_assignment ctx lhs rhs continuation =
       if variance <> Mutable then
         failwith (Printf.sprintf "Cannot assign to immutable variable: %s" name);
 
-      let rhs_expr = translate_expr ctx rhs continuation in
-      (* Use maybe_var to handle complex RHS expressions *)
+      (* For RHS, use a unit continuation since we'll chain the real continuation ourselves *)
+      let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+      let rhs_expr = translate_expr ctx rhs unit_cont in
+      (* Use maybe_var to handle complex RHS expressions, then sequence with continuation *)
       maybe_var (fun rhs_term ->
-        { core_desc = CWrite (name, rhs_term);
-          core_type = Unit }
+        let write_stmt = { core_desc = CWrite (name, rhs_term); core_type = Unit } in
+        (* Chain the write with the continuation to ensure sequencing works *)
+        { core_desc = CSequence (write_stmt, continuation);
+          core_type = continuation.core_type }
       ) rhs_expr
 
   | "PropertyAccessExpression" ->
@@ -713,11 +898,52 @@ and translate_assignment ctx lhs rhs continuation =
       (match children with
        | [obj_json; prop_json] ->
            let field_name = get_identifier prop_json in
-           let obj_expr = translate_expr ctx obj_json continuation in
-           let rhs_expr = translate_expr ctx rhs continuation in
-           (* CSetField now takes core_lang for both arguments *)
-           { core_desc = CSetField (obj_expr, field_name, rhs_expr);
-             core_type = Unit }
+           (* Check if this is x.value = v on Ref<T> *)
+           if field_name = "value" then
+             let obj_name_opt =
+               try Some (get_identifier obj_json)
+               with _ -> None
+             in
+             match obj_name_opt with
+             | Some obj_name ->
+                 let obj_type = get_type ctx obj_name in
+                 (match is_ref_type obj_type with
+                  | Some _inner_type ->
+                      (* x.value = v on Ref<T> becomes CWrite (x, v) *)
+                      let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+                      let rhs_expr = translate_expr ctx rhs unit_cont in
+                      maybe_var (fun rhs_term ->
+                        let write_stmt = { core_desc = CWrite (obj_name, rhs_term); core_type = Unit } in
+                        { core_desc = CSequence (write_stmt, continuation);
+                          core_type = continuation.core_type }
+                      ) rhs_expr
+                  | None ->
+                      (* Not a ref, use regular field assignment *)
+                      let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+                      let obj_expr = translate_expr ctx obj_json unit_cont in
+                      let rhs_expr = translate_expr ctx rhs unit_cont in
+                      let set_stmt = { core_desc = CSetField (obj_expr, field_name, rhs_expr);
+                                      core_type = Unit } in
+                      { core_desc = CSequence (set_stmt, continuation);
+                        core_type = continuation.core_type })
+             | None ->
+                 (* Complex expression, use regular field assignment *)
+                 let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+                 let obj_expr = translate_expr ctx obj_json unit_cont in
+                 let rhs_expr = translate_expr ctx rhs unit_cont in
+                 let set_stmt = { core_desc = CSetField (obj_expr, field_name, rhs_expr);
+                                 core_type = Unit } in
+                 { core_desc = CSequence (set_stmt, continuation);
+                   core_type = continuation.core_type }
+           else
+             (* Non-.value field assignment *)
+             let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+             let obj_expr = translate_expr ctx obj_json unit_cont in
+             let rhs_expr = translate_expr ctx rhs unit_cont in
+             let set_stmt = { core_desc = CSetField (obj_expr, field_name, rhs_expr);
+                             core_type = Unit } in
+             { core_desc = CSequence (set_stmt, continuation);
+               core_type = continuation.core_type }
        | _ -> failwith "PropertyAccessExpression must have exactly 2 children")
 
   | kind -> failwith ("Unsupported assignment target: " ^ kind)
@@ -820,6 +1046,7 @@ and translate_function_decl outer_ctx json continuation =
   let func_ctx = {
     variance_env = Hashtbl.copy outer_ctx.variance_env;
     type_env = Hashtbl.copy outer_ctx.type_env;
+    type_params = outer_ctx.type_params;
   } in
 
   (* Register parameters in the function's local context *)
@@ -998,6 +1225,18 @@ let extract_function_info ctx json =
   let used_globals = (global_access.reads @ global_access.writes)
                      |> List.sort_uniq String.compare in
 
+  (* Add globals as ref parameters - this allows separation logic specs to work correctly.
+     Instead of wrapping body with "let globalName = ref 0", we pass globals as parameters.
+     This matches the OCaml style: "let f n1_val n2_val = ..." where n1_val, n2_val are refs. *)
+  let global_params = List.map (fun global_name ->
+    let typ = get_type ctx global_name in
+    let ref_typ = TConstr ("ref", [typ]) in
+    (global_name, ref_typ)
+  ) used_globals in
+
+  (* Combine explicit params with global params *)
+  let all_params = typed_params @ global_params in
+
   let final_cont = {
     core_desc = CValue { term_desc = Const ValUnit; term_type = ret_type };
     core_type = ret_type
@@ -1017,35 +1256,32 @@ let extract_function_info ctx json =
                translate_stmt ctx stmt rest_expr)
   in
 
-  let body_expr_raw = translate_body body_statements final_cont in
+  (* Body no longer needs wrapping - globals are now parameters *)
+  let body_expr = translate_body body_statements final_cont in
 
-  (* Wrap body with global declarations for any globals used by this method *)
-  let body_expr = List.fold_right (fun global_name acc ->
-    let typ = get_type ctx global_name in
-    let ref_typ = TConstr ("ref", [typ]) in
-    let init_value = { term_desc = Const (Num 0); term_type = typ } in
-    { core_desc = CLet ((global_name, ref_typ),
-                        { core_desc = CRef init_value; core_type = ref_typ },
-                        acc);
-      core_type = acc.core_type }
-  ) used_globals body_expr_raw in
+  (* Check for case-based specification first *)
+  let case_spec_opt = parse_case_spec json in
 
   (* For functions with local refs (wrapped globals), let the verifier infer the spec *)
   (* The inferred spec will properly handle existential quantification *)
   let spec_opt =
-    try
-      let untyped_spec = parse_to_hiptype json in
-      Some (retype_staged_spec untyped_spec)
-    with e ->
-      Printf.eprintf "Warning: Failed to parse JSDoc spec: %s\n" (Printexc.to_string e);
-      Printf.eprintf "Falling back to inferred spec (no given spec)\n";
-      (* Return None to let verifier infer the spec *)
+    (* If we have a case spec, don't try to parse as staged spec *)
+    if Option.is_some case_spec_opt then
       None
+    else
+      try
+        let untyped_spec = parse_to_hiptype json in
+        Some (retype_staged_spec untyped_spec)
+      with e ->
+        Printf.eprintf "Warning: Failed to parse JSDoc spec: %s\n" (Printexc.to_string e);
+        Printf.eprintf "Falling back to inferred spec (no given spec)\n";
+        (* Return None to let verifier infer the spec *)
+        None
   in
 
   let body_with_ret_type = { body_expr with core_type = ret_type } in
 
-  (name, typed_params, spec_opt, body_with_ret_type, [], None)
+  (name, all_params, spec_opt, case_spec_opt, body_with_ret_type, [], None)
 
 let translate_program_to_intermediates json =
   let ctx = create_context () in
@@ -1073,8 +1309,8 @@ let translate_program_to_intermediates json =
   List.filter_map (fun stmt ->
     match get_kind stmt with
     | "FunctionDeclaration" ->
-        let (name, params, spec, body, tactics, pure_info) = extract_function_info ctx stmt in
-        Some (`Meth (name, params, spec, body, tactics, pure_info))
+        let (name, params, spec, case_spec, body, tactics, pure_info) = extract_function_info ctx stmt in
+        Some (`Meth (name, params, spec, case_spec, body, tactics, pure_info))
     | "VariableStatement" ->
         (* Skip variable statements in output *)
         None

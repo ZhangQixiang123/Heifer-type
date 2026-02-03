@@ -1210,7 +1210,114 @@ let rec apply_ent_rule ?name : tactic =
         Subst.subst_free_vars [(ident_of_binder x1, var x3)] f4,
         Subst.subst_free_vars [(ident_of_binder x2, var x3)] f6 )
       k
-  (* disjunction *)
+  (* Multi entailment rules *)
+  | Multi (f3, f4), Multi (g3, g4) ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: multi multi" (pctx, f1, f2))
+    in
+    (* Both branches must entail their counterparts *)
+    let@ pctx, _, _ = entailment_search ?name (pctx, f3, g3) in
+    entailment_search ?name (pctx, f4, g4) k
+  | Multi (f3, f4), f2 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: multi single" (pctx, f1, f2))
+    in
+    (* Both branches of Multi must entail f2 *)
+    let@ pctx, _, _ = entailment_search ?name (pctx, f3, f2) in
+    entailment_search ?name (pctx, f4, f2) k
+  | f1, Multi (g3, g4) ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: single multi" (pctx, f1, f2))
+    in
+    (* f1 must entail at least one branch of Multi *)
+    or_
+      (fun k1 -> entailment_search ?name (pctx, f1, g3) k1)
+      (fun k1 -> entailment_search ?name (pctx, f1, g4) k1)
+      k
+  (* Assume entailment rules *)
+  | Assume f3, Assume f4 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: assume assume" (pctx, f1, f2))
+    in
+    entailment_search ?name (pctx, f3, f4) k
+  | Assume f3, f2 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: assume single" (pctx, f1, f2))
+    in
+    (* Assume(f) entails f *)
+    entailment_search ?name (pctx, f3, f2) k
+  (* Reset entailment rules *)
+  | Reset f3, Reset f4 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: reset reset" (pctx, f1, f2))
+    in
+    entailment_search ?name (pctx, f3, f4) k
+  | Reset f3, NormalReturn (p2, h2) ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: reset ens" (pctx, f1, f2))
+    in
+    (* Reset can be eliminated when body entails normal return *)
+    entailment_search ?name (pctx, f3, NormalReturn (p2, h2)) k
+  (* Shift entailment rules *)
+  | Shift (b1, x1, body1, k1, cont1), Shift (b2, x2, body2, k2, cont2) when b1 = b2 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: shift shift" (pctx, f1, f2))
+    in
+    (* Alpha-rename to fresh variables for comparison *)
+    let x_fresh = Variables.fresh_variable ~v:(ident_of_binder x1) () in
+    let k_fresh = Variables.fresh_variable ~v:(ident_of_binder k1) () in
+    let body1' = Subst.subst_free_vars [(ident_of_binder x1, var x_fresh)] body1 in
+    let body2' = Subst.subst_free_vars [(ident_of_binder x2, var x_fresh)] body2 in
+    let cont1' = Subst.subst_free_vars [(ident_of_binder k1, var k_fresh)] cont1 in
+    let cont2' = Subst.subst_free_vars [(ident_of_binder k2, var k_fresh)] cont2 in
+    (* Both body and continuation must entail *)
+    let@ pctx, _, _ = entailment_search ?name (pctx, body1', body2') in
+    entailment_search ?name (pctx, cont1', cont2') k
+  (* RaisingEff entailment rules *)
+  | RaisingEff (p1, h1, (eff1, args1), _r1), RaisingEff (p2, h2, (eff2, args2), _r2) when eff1 = eff2 ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: raise raise" (pctx, f1, f2))
+    in
+    (* Effect names must match, check arguments and heap *)
+    let args_match =
+      List.length args1 = List.length args2 &&
+      List.for_all2 (fun a1 a2 ->
+        a1 = a2 || check_pure_obligation (conj pctx.assumptions) (eq a1 a2)
+      ) args1 args2
+    in
+    if args_match then begin
+      let@ (ap, ah), (fp, fh) = biab h1 h2 in
+      let valid = check_pure_obligation
+        (conj (pctx.assumptions @ [p1; ap; Heap.xpure h1]))
+        (conj [p2; fp; Heap.xpure h2]) in
+      if valid then
+        entailment_search ?name (pctx, req ~h:ah (), req ~h:fh ()) k
+      else fail
+    end else fail
+  (* TryCatch structural matching *)
+  | TryCatch (_p1, _h1, (body1, handlers1), _r1), TryCatch (_p2, _h2, (body2, handlers2), _r2) ->
+    let@ _ =
+      span (fun _r -> log_proof_state ~title:"ent: trycatch trycatch" (pctx, f1, f2))
+    in
+    (* Match the bodies and then the handlers *)
+    let@ pctx, _, _ = entailment_search ?name (pctx, body1, body2) in
+    (* For now, require handlers to be structurally equivalent *)
+    let ((_norm_var1, norm_spec1), eff_handlers1) = handlers1 in
+    let ((_norm_var2, norm_spec2), eff_handlers2) = handlers2 in
+    let@ pctx, _, _ = entailment_search ?name (pctx, norm_spec1, norm_spec2) in
+    (* Check effect handlers pairwise *)
+    if List.length eff_handlers1 = List.length eff_handlers2 then
+      let rec check_handlers pctx handlers1 handlers2 =
+        match handlers1, handlers2 with
+        | [], [] -> k (pctx, ens (), ens ())
+        | (eff1, _arg1, spec1) :: rest1, (eff2, _arg2, spec2) :: rest2 when eff1 = eff2 ->
+          let@ pctx, _, _ = entailment_search ?name (pctx, spec1, spec2) in
+          check_handlers pctx rest1 rest2
+        | _ -> fail
+      in
+      check_handlers pctx eff_handlers1 eff_handlers2
+    else fail
+  (* catch-all / fallback *)
   | _, _ ->
     let ps = (pctx, f1, f2) in
     let ps1 =

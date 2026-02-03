@@ -212,8 +212,8 @@ let return_var_name t =
   |Type (BaseTy (Tvar s)) -> s
   |_ -> failwith "must be var"
 
-let rec map_typ_to_ty typ1  =  
-  match typ1 with 
+let rec map_typ_to_ty typ1  =
+  match typ1 with
   | Any ->  (BaseTy AnyBty)
   | Unit ->  (BaseTy UnitBty)
   | Int ->  (BaseTy IntBty)
@@ -222,7 +222,13 @@ let rec map_typ_to_ty typ1  =
   | Arrow (a,b)->  (ArrowTy (map_typ_to_ty a, map_typ_to_ty b))
   | TConstr (a,b) ->  (BaseTy (Defty (a, (List.map map_typ_to_ty b))))
   | TVar s ->  (BaseTy (Tyvar s))
-  | _ -> failwith "unsupported constructor"
+  | TRecord fields ->
+      (* Encode record as Defty with canonical name based on field names *)
+      let field_names = List.map fst fields in
+      let record_name = "{" ^ String.concat ";" field_names ^ "}" in
+      let field_types = List.map (fun (_, t) -> map_typ_to_ty t) fields in
+      (BaseTy (Defty (record_name, field_types)))
+  | Lamb -> failwith "Lamb type not supported in map_typ_to_ty"
 
 let rec map_ter_to_ty t = 
     match t.term_desc with

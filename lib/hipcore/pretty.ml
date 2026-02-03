@@ -329,6 +329,11 @@ and string_of_intermediate (i : intermediate) =
   | Pred _ -> "[predicate]"
   | SLPred _ -> "[sl predicate]"
   | Typedef _ -> "[type definition]"
+  | SimpleMeth (name, params, _spec, body) ->
+      Format.sprintf "let %s %s (*@ simple spec @*) = %s"
+        name
+        (String.concat ", " params)
+        (string_of_core_lang body)
 
 and string_of_constr_cases cs =
   cs

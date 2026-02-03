@@ -19,6 +19,8 @@ open Hiptypes
 %token RPAREN
 %token LBRACKET
 %token RBRACKET
+%token LBRACE
+%token RBRACE
 %token SEMI
 %token COMMA
 %token COLON
@@ -47,6 +49,8 @@ open Hiptypes
 %token SHIFT
 %token RESET
 %token LONGARROW
+%token CASE
+%token FATARROW
 %token TOP
 %token BOT
 %token ANY
@@ -90,6 +94,10 @@ open Hiptypes
 %type <Hiptypes.term> parse_term
 %start parse_lemma
 %type <Hiptypes.lemma> parse_lemma
+%start parse_simple_spec
+%type <Hiptypes.simple_spec> parse_simple_spec
+%start parse_case_spec
+%type <Hiptypes.case_spec> parse_case_spec
 %%
 
 %inline bin_rel_op:
@@ -190,6 +198,13 @@ term:
       { Const c }
   | v = LOWERCASE_IDENT
       { Var v }
+  (* Allow type keywords as terms for colon assertions like "x : int" *)
+  | INTB
+      { Var "int" }
+  | UNIT
+      { Var "unit" }
+  | BOOLBTY
+      { Var "bool" }
   | TILDE t = term
       { TNot t }
   | t1 = term op = bin_rel_op t2 = term
@@ -237,6 +252,11 @@ pi:
       { Colon (v, t)}
 ;
 
+record_field:
+  | f = LOWERCASE_IDENT COLON t = term
+      { (f, t) }
+;
+
 kappa:
   | EMP
       { EmptyHeap }
@@ -244,6 +264,11 @@ kappa:
       { PointsTo (v, t) }
   | v = TYVAR MINUSGREATER t = term
       { PointsTo (v, t) }
+  (* Record points-to: v -> {f1: t1, f2: t2, ...} *)
+  | v = LOWERCASE_IDENT MINUSGREATER LBRACE fields = separated_nonempty_list(COMMA, record_field) RBRACE
+      { RecordPointsTo (v, fields) }
+  | v = TYVAR MINUSGREATER LBRACE fields = separated_nonempty_list(COMMA, record_field) RBRACE
+      { RecordPointsTo (v, fields) }
   | k1 = kappa STAR k2 = kappa
       { SepConj (k1, k2) }
   | k = delimited(LPAREN, kappa, RPAREN)
@@ -335,3 +360,77 @@ parse_lemma:
 parse_state:
   | t = state EOF
       { t }
+
+(* Simple separation logic specification: requires/ensures only *)
+simple_spec_body:
+  (* Only ensures (postcondition) *)
+  | ENSURES post = state
+      { { ss_precond = None; ss_postcond = post; ss_ex = []; ss_fa = [] } }
+  (* Only requires (precondition) - postcondition defaults to True/emp *)
+  | REQUIRES pre = state
+      { { ss_precond = Some pre; ss_postcond = (True, EmptyHeap); ss_ex = []; ss_fa = [] } }
+  (* Both requires and ensures *)
+  | REQUIRES pre = state ENSURES post = state
+      { { ss_precond = Some pre; ss_postcond = post; ss_ex = []; ss_fa = [] } }
+;
+
+simple_spec:
+  (* Existential quantification *)
+  | EXISTS vs = LOWERCASE_IDENT+ DOT s = simple_spec
+      { { s with ss_ex = vs @ s.ss_ex } }
+  (* Universal quantification *)
+  | FORALL vs = LOWERCASE_IDENT+ DOT s = simple_spec
+      { { s with ss_fa = vs @ s.ss_fa } }
+  (* Base case *)
+  | simple_spec_body
+      { $1 }
+  (* Parenthesized *)
+  | LPAREN s = simple_spec RPAREN
+      { s }
+;
+
+parse_simple_spec:
+  | s = simple_spec EOF
+      { s }
+
+(* ========== CASE-BASED SPECIFICATIONS ========== *)
+
+(* A single case branch: precondition => postcondition *)
+case_branch:
+  | pre = state FATARROW ENSURES post = state
+      { { cb_pre = pre; cb_post = post } }
+  | pre = state FATARROW post = state
+      { { cb_pre = pre; cb_post = post } }
+;
+
+(* List of case branches separated by semicolons *)
+case_branches:
+  | b = case_branch
+      { [b] }
+  | b = case_branch SEMI rest = case_branches
+      { b :: rest }
+;
+
+(* Case specification: case [params] { branch1; branch2; ... } *)
+case_spec_body:
+  | CASE LBRACKET params = separated_list(COMMA, LOWERCASE_IDENT) RBRACKET
+    LBRACE branches = case_branches RBRACE
+      { { cs_type_vars = []; cs_forall = []; cs_params = params; cs_branches = branches } }
+;
+
+(* Case spec with optional quantifiers *)
+case_spec:
+  (* Universal quantification *)
+  | FORALL vs = LOWERCASE_IDENT+ DOT s = case_spec
+      { { s with cs_forall = vs @ s.cs_forall } }
+  (* Base case *)
+  | case_spec_body
+      { $1 }
+  (* Parenthesized *)
+  | LPAREN s = case_spec RPAREN
+      { s }
+;
+
+parse_case_spec:
+  | s = case_spec EOF
+      { s }

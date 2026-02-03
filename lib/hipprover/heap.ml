@@ -12,6 +12,7 @@ let rec split_one (h : kappa) : ((string * term) * kappa) option =
   match h with
   | EmptyHeap -> None
   | PointsTo (x, t) -> Some ((x, t), EmptyHeap)
+  | RecordPointsTo (_, _) -> None (* RecordPointsTo is handled separately *)
   | SepConj (a, b) ->
       match split_one a with
       | None -> split_one b
@@ -23,6 +24,7 @@ let rec split_find (n : string) (h : kappa) : (term * kappa) option =
   | EmptyHeap -> None
   | PointsTo (x, t) ->
       if x = n then Some (t, EmptyHeap) else None
+  | RecordPointsTo (_, _) -> None (* RecordPointsTo is handled separately *)
   | SepConj (a, b) ->
       match split_find n a with
       | Some (t, r) -> Some (t, SepConj (r, b))
@@ -49,6 +51,10 @@ let xpure (h : kappa) : pi =
     match h with
     | EmptyHeap -> (True, [])
     | PointsTo (x, t) -> Syntax.(Atomic (GT, var x ~typ:Int, num 0), [(x, t.term_type)])
+    | RecordPointsTo (x, fields) ->
+        (* For records, we also require the pointer to be positive, and collect all field types *)
+        let field_binders = List.map (fun (name, t) -> (name, t.term_type)) fields in
+        Syntax.(Atomic (GT, var x ~typ:Int, num 0), (x, TRecord (List.map (fun (n, t) -> (n, t.term_type)) fields)) :: field_binders)
     | SepConj (a, b) ->
         let a, xs = run a in
         let b, ys = run b in
@@ -56,21 +62,40 @@ let xpure (h : kappa) : pi =
   in
   fst (run h)
 
-let rec find_var_in_heap (v:string) (h:kappa) = 
-  
+let rec find_var_in_heap (v:string) (h:kappa) =
+
   match h with
   | EmptyHeap -> []
   | PointsTo (x, t) ->
       if x = v then [(x,t)] else []
+  | RecordPointsTo (x, fields) ->
+      (* For records, if the var matches, return the var with a record term representation *)
+      if x = v then
+        let record_type = TRecord (List.map (fun (name, t) -> (name, t.term_type)) fields) in
+        let record_term = {term_desc = TRecordTerm fields; term_type = record_type} in
+        [(x, record_term)]
+      else []
   | SepConj (a, b) ->
       (find_var_in_heap v a) @ (find_var_in_heap v b) 
 
 
 
-let rec find_alising v (h:pi) = 
+let try_return_var_name t =
+  match t with
+  | Typed_core_ast.Var x -> Some x
+  | Typed_core_ast.Type (BaseTy (Tvar s)) -> Some s
+  | _ -> None
+
+let rec find_alising v (h:pi) =
   (*give v, find all x that x=v relation in pi*)
   match h with
-  | Atomic (EQ, a, b) -> if (Typed_core_ast.return_var_name a.term_desc) = v then [Typed_core_ast.return_var_name b.term_desc] else if (Typed_core_ast.return_var_name b.term_desc) = v then [Typed_core_ast.return_var_name a.term_desc] else []
+  | Atomic (EQ, a, b) ->
+      (match try_return_var_name a.term_desc, try_return_var_name b.term_desc with
+       | Some a_var, Some b_var ->
+           if a_var = v then [b_var]
+           else if b_var = v then [a_var]
+           else []
+       | _ -> [])
   | And (a, b) ->
        (find_alising v a) @ (find_alising v b)
   | _ -> []
@@ -93,19 +118,28 @@ let find_alised_var_in_heap v (s:(pi * kappa)) =
 
   
 
-let rec swap_var_name_in_heap (ori:string) (replace:string) (h:kappa) = 
+let rec swap_var_name_in_heap (ori:string) (replace:string) (h:kappa) =
   match h with
   | EmptyHeap -> EmptyHeap
   | PointsTo (x, t) ->
       if x=ori then PointsTo (replace, t) else  PointsTo (x, t)
+  | RecordPointsTo (x, fields) ->
+      if x=ori then RecordPointsTo (replace, fields) else RecordPointsTo (x, fields)
   | SepConj (a, b) ->
       SepConj (swap_var_name_in_heap ori replace a, swap_var_name_in_heap ori replace b)
 
-let rec swap_content_in_heap (var:string) (contents:term) (h:kappa) = 
+let rec swap_content_in_heap (var:string) (contents:term) (h:kappa) =
   match h with
   | EmptyHeap -> EmptyHeap
   | PointsTo (x, t) ->
       if x=var then PointsTo (x, contents) else  PointsTo (x, t)
+  | RecordPointsTo (x, fields) ->
+      (* For records, if var matches, replace with contents if it's a record term *)
+      if x=var then
+        (match contents.term_desc with
+         | TRecordTerm new_fields -> RecordPointsTo (x, new_fields)
+         | _ -> RecordPointsTo (x, fields)) (* Keep original if contents is not a record *)
+      else RecordPointsTo (x, fields)
   | SepConj (a, b) ->
       SepConj (swap_content_in_heap var contents a, swap_content_in_heap var contents b)
 
@@ -116,11 +150,15 @@ let rec find_var_in_pure (v:string) (h:pi) =
        (find_var_in_pure v a) @ (find_var_in_pure v b)
   | _ -> []
 
-let rec swap_var_name_in_pure (ori:string) (replace:string) (s:pi) = 
+let rec swap_var_name_in_pure (ori:string) (replace:string) (s:pi) =
   match s with
   | Colon (x,t) -> if x = ori then Colon (replace,t) else Colon (x,t)
-  | Atomic (EQ, a, b) -> if (Typed_core_ast.return_var_name a.term_desc) = ori then Atomic (EQ, {term_desc=Var replace;term_type=a.term_type}, b) else if (Typed_core_ast.return_var_name b.term_desc) = ori then  Atomic (EQ, a, {term_desc=Var replace;term_type=b.term_type}) else s
-
+  | Atomic (EQ, a, b) ->
+      let a_is_ori = match try_return_var_name a.term_desc with Some v -> v = ori | None -> false in
+      let b_is_ori = match try_return_var_name b.term_desc with Some v -> v = ori | None -> false in
+      if a_is_ori then Atomic (EQ, {term_desc=Var replace;term_type=a.term_type}, b)
+      else if b_is_ori then Atomic (EQ, a, {term_desc=Var replace;term_type=b.term_type})
+      else s
   | And (a, b) ->
        And (swap_var_name_in_pure ori replace a, swap_var_name_in_pure ori replace b)
   | _ -> s

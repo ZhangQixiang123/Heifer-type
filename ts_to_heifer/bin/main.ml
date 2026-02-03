@@ -45,7 +45,7 @@ let () =
       Printf.printf "(* Translated from TypeScript *)\n\n";
       List.iter (fun item ->
         match item with
-        | `Meth (name, params, spec, body, _tactics, _pure_info) ->
+        | `Meth (name, params, spec, _case_spec, body, _tactics, _pure_info) ->
             print_function name params spec body
       ) intermediates;
 

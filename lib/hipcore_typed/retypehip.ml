@@ -145,6 +145,20 @@ let retype_sl_pred_def (d : Hiptypes.sl_pred_def) : sl_pred_def =
     p_sl_body = retype_state d.p_sl_body
   }
 
+let retype_simple_spec (s : Hiptypes.simple_spec) : simple_spec =
+  { ss_precond = Option.map retype_state s.ss_precond;
+    ss_postcond = retype_state s.ss_postcond;
+    ss_ex = List.map binder_of_ident s.ss_ex;
+    ss_fa = List.map binder_of_ident s.ss_fa
+  }
+
+let retype_simple_meth_def (d : Hiptypes.simple_meth_def) : simple_meth_def =
+  { sm_name = d.sm_name;
+    sm_params = List.map binder_of_ident d.sm_params;
+    sm_spec = Option.map retype_simple_spec d.sm_spec;
+    sm_body = retype_core_lang d.sm_body
+  }
+
 let retype_single_subsumption_obligation (vars, (l, r)) =
   (vars, (retype_staged_spec l, retype_staged_spec r))
 
@@ -168,8 +182,10 @@ let retype_intermediate (i : Hiptypes.intermediate) : intermediate =
   | Meth (name, params, spec, body, tactics, pure_fn_info) ->
       Meth (name, List.map binder_of_ident params, Option.map retype_staged_spec spec, retype_core_lang body,
       tactics, Option.map (fun (typs, ret) -> (typs, ret)) pure_fn_info)
-  | Pred pred_def -> Pred (retype_pred_def pred_def) 
+  | Pred pred_def -> Pred (retype_pred_def pred_def)
   | SLPred sl_pred_def -> SLPred (retype_sl_pred_def sl_pred_def)
+  | SimpleMeth (name, params, spec, body) ->
+      SimpleMeth (name, List.map binder_of_ident params, Option.map retype_simple_spec spec, retype_core_lang body)
   | Typedef t -> Typedef t
 
 let retype_bindings (bindings : (string * Hiptypes.term) list) : (binder * term) list =

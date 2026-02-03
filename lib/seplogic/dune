@@ -1,0 +1,9 @@
+(library
+ (name seplogic)
+ (public_name heifer.seplogic)
+ (modules sl_types sl_forward sl_entail sl_lib)
+ (libraries debug search hipcore provers utils z3 hipcore_typed hipprover)
+ (inline_tests)
+ (preprocess (pps ppx_expect)))
+
+(env (dev (flags (:standard -warn-error -A))))

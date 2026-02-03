@@ -646,4 +646,6 @@ let transform_str (bound_names : binder list) (s : structure_item) =
     | None -> None
   end
   | Tstr_open _ -> None
+  (* Skip record type declarations - they're just OCaml type annotations *)
+  | Tstr_type (_, {typ_kind = Ttype_record _; _}::_) -> None
   | _ -> failwith "unknown program element"

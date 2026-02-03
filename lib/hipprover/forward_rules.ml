@@ -500,17 +500,21 @@ let extract_return (s:staged_spec) = match s with
          | _ -> failwith "should be some return forms"
 
                   
-let rec find_all_binders (s:staged_spec) = 
-  match s with 
+let rec find_all_binders (s:staged_spec) =
+  match s with
   | ForAll (b,s2) -> (b :: fst (find_all_binders s2), snd (find_all_binders s2))
-  | Sequence (pre,post) -> ([], (pre,post)) 
-  | _ -> failwith "type verification must have single req and ens" 
+  | Sequence (pre,post) -> ([], (pre,post))
+  | NormalReturn (p, k) -> ([], (Require (True, EmptyHeap), NormalReturn (p, k)))
+  | Exists (b, s2) -> (b :: fst (find_all_binders s2), snd (find_all_binders s2))
+  | _ -> failwith "find_all_binders: type verification must have single req and ens"
 
-let rec find_pre_post (s:staged_spec) = 
-  match s with 
+let rec find_pre_post (s:staged_spec) =
+  match s with
   | ForAll (_,s2) -> find_pre_post s2
-  | Sequence (Require (pre_pi,pre_kappa), NormalReturn (post_pi,post_kappa)) -> ((pre_pi,pre_kappa), (post_pi,post_kappa)) 
-  | _ -> failwith "type verification must have single req and ens" 
+  | Exists (_, s2) -> find_pre_post s2
+  | Sequence (Require (pre_pi,pre_kappa), NormalReturn (post_pi,post_kappa)) -> ((pre_pi,pre_kappa), (post_pi,post_kappa))
+  | NormalReturn (post_pi, post_kappa) -> ((True, EmptyHeap), (post_pi, post_kappa))
+  | _ -> failwith "find_pre_post: type verification must have single req and ens" 
 
 let remove_req (s:staged_spec) = 
   match s with 
@@ -627,12 +631,26 @@ let entail_type (left_ori:pi*kappa) (right_ori:staged_spec) mapping =
   left := residue; 
   let remaining_frame = List.fold_right (fun x acc-> remove_from_residue_kappa acc (PointsTo (fst x,snd x))) !remove_list_2 !right in 
   let remove_list_3 = ref [] in  
-  let rec check_remaining f = 
-    match f with 
-    |SepConj (a,b) -> check_remaining a && check_remaining b 
-    | EmptyHeap -> true 
-    | PointsTo (a,b) -> let r = find_in_state a !left in 
-                        if (fst r) = "s" then false else if (PointsTo (a,b) = PointsTo (fst (snd r), snd (snd r))) then (remove_list_3 := (snd r)::!remove_list_3;true) else false 
+  let rec check_remaining f =
+    match f with
+    |SepConj (a,b) -> check_remaining a && check_remaining b
+    | EmptyHeap -> true
+    | PointsTo (a,b) -> let r = find_in_state a !left in
+                        if (fst r) = "s" then false else if (PointsTo (a,b) = PointsTo (fst (snd r), snd (snd r))) then (remove_list_3 := (snd r)::!remove_list_3;true) else false
+    | RecordPointsTo (a, fields) ->
+        (* For record points-to, check if we can find a matching record in the left state *)
+        let r = find_in_state a !left in
+        if (fst r) = "s" then false
+        else
+          (* Check if the found record matches *)
+          let found_term = snd (snd r) in
+          (match found_term.term_desc with
+           | TRecordTerm found_fields ->
+               if List.length fields = List.length found_fields &&
+                  List.for_all2 (fun (n1, t1) (n2, t2) -> n1 = n2 && t1 = t2) fields found_fields
+               then (remove_list_3 := (snd r)::!remove_list_3; true)
+               else false
+           | _ -> false)
     in 
   let entail_result = check_remaining (snd remaining_frame) in 
   let final_residue = List.fold_right (fun x acc-> remove_from_residue_kappa acc (PointsTo (fst x,snd x))) !remove_list_3 !left in 
@@ -841,9 +859,72 @@ let analyze_type_spec (spec:staged_spec) (meth:meth_def) (prog:core_program):  (
   )
 
 
-(* let unify_ty (f:staged_spec) (var:string) (target:string) = 
-    let change_for_state (v:string) (t:string) (s:(pi*kappa)) = 
+(* let unify_ty (f:staged_spec) (var:string) (target:string) =
+    let change_for_state (v:string) (t:string) (s:(pi*kappa)) =
       swap_var_name_in_state *)
+
+(* ============================================================ *)
+(* Simple Spec Forward Verification *)
+(* ============================================================ *)
+
+(** Generate a simple_spec from code by running forward verification
+    and converting the result.
+
+    This is used for methods with simple separation logic specs.
+
+    @param env Forward verification environment
+    @param expr The code expression
+    @return Some simple_spec if conversion succeeds, None if the
+            inferred spec uses complex features (effects, etc.)
+*)
+let forward_simple (env: fvenv) (expr : core_lang) : simple_spec option * fvenv =
+  (* First, run full forward verification to get staged_spec *)
+  let staged, env = forward env expr in
+  debug ~at:3 ~title:"forward_simple staged"
+    "%s" (Pretty.string_of_staged_spec staged);
+  (* Try to convert to simple_spec *)
+  let simple = Simple_entail.simple_of_staged staged in
+  (match simple with
+   | None ->
+       debug ~at:3 ~title:"forward_simple"
+         "Could not convert to simple_spec"
+   | Some ss ->
+       debug ~at:3 ~title:"forward_simple simple"
+         "%s" (Pretty.string_of_staged_spec (Simple_entail.staged_of_simple ss)));
+  simple, env
+
+(** Verify a method with simple spec.
+
+    @param env Forward verification environment
+    @param meth The simple method definition
+    @return true if the inferred spec satisfies the declared spec
+*)
+let verify_simple_method (env: fvenv) (meth : simple_meth_def) : bool =
+  match meth.sm_spec with
+  | None ->
+      (* No declared spec - just run forward verification *)
+      let _ = forward_simple env meth.sm_body in
+      true
+  | Some declared ->
+      (* Run forward verification *)
+      let inferred_opt, _env = forward_simple env meth.sm_body in
+      match inferred_opt with
+      | None ->
+          (* Inferred spec uses complex features - cannot verify with simple entailment *)
+          debug ~at:1 ~title:"simple_verify"
+            "Method %s: inferred spec uses complex features"
+            meth.sm_name;
+          false
+      | Some inferred ->
+          (* Check simple spec entailment *)
+          let result = Simple_entail.check_simple_spec_entailment inferred declared in
+          debug ~at:1 ~title:"simple_verify"
+            "Method %s: %s"
+            meth.sm_name
+            (Simple_entail.string_of_result result);
+          match result with
+          | Simple_entail.Valid -> true
+          | Simple_entail.Invalid _ -> false
 
 
   

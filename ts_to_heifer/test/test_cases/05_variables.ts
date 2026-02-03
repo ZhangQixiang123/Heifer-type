@@ -1,58 +1,115 @@
 // Test 5: Variable declarations and mutations
-// Testing const, let, and reassignment
+// Testing const, let, and reassignment with separation logic specs
 
-// Immutable variable (const)
-function const_variable(): number {
-  const x: number = 10;
-  return x + 5;
+// Global mutable variable for testing
+let globalVar: number = 0;
+
+/**
+ * Simple read of global
+ * @require globalVar -> v
+ * @ensure globalVar -> v /\ res = v
+ */
+function readGlobal_true(): number {
+  return globalVar;
 }
 
-// Immutable let (never reassigned)
-function immutable_let(): number {
-  let x: number = 10;
-  let y: number = 20;
-  return x + y;
+/**
+ * Simple write to global
+ * @require globalVar -> old
+ * @ensure globalVar -> 42
+ */
+function writeGlobal_true(): void {
+  globalVar = 42;
 }
 
-// Mutable variable (reassigned)
-function mutable_variable(): number {
-  let x: number = 10;
-  x = x + 5;
-  return x;
+/**
+ * Increment global
+ * @require globalVar -> v
+ * @ensure globalVar -> v + 1
+ */
+function incrementGlobal_true(): void {
+  globalVar = globalVar + 1;
 }
 
-// Multiple reassignments
-function multiple_mutations(): number {
-  let sum: number = 0;
-  sum = sum + 10;
-  sum = sum + 20;
-  sum = sum + 30;
-  return sum;
+/**
+ * Multiple increments to global
+ * @require globalVar -> v
+ * @ensure globalVar -> v + 3
+ */
+function tripleIncrement_true(): void {
+  globalVar = globalVar + 1;
+  globalVar = globalVar + 1;
+  globalVar = globalVar + 1;
 }
 
-// Mixed immutable and mutable
-function mixed_variables(): number {
-  const a: number = 10;
-  let b: number = 20;
-  b = b + a;
-  const c: number = b * 2;
-  return c;
+/**
+ * Add parameter to global
+ * @require globalVar -> v
+ * @ensure globalVar -> v + amount
+ */
+function addToGlobal_true(amount: number): void {
+  globalVar = globalVar + amount;
 }
 
-// Variable shadowing
-function shadowing(): number {
-  let x: number = 10;
-  {
-    let x: number = 20;
-    return x;
-  }
+/**
+ * Read-modify-write: add 10 to global value
+ * @require globalVar -> v
+ * @ensure globalVar -> v + 10
+ */
+function addTenToGlobal_true(): void {
+  globalVar = globalVar + 10;
 }
 
-// Increment and decrement patterns
-function increment_pattern(): number {
-  let count: number = 0;
-  count = count + 1;
-  count = count + 1;
-  count = count + 1;
-  return count;
+// Second global for multi-variable tests
+let globalVar2: number = 0;
+
+/**
+ * Copy value from one global to another
+ * @require globalVar -> v1 * globalVar2 -> v2
+ * @ensure globalVar -> v1 * globalVar2 -> v1
+ */
+function copyGlobal_true(): void {
+  globalVar2 = globalVar;
+}
+
+/**
+ * Swap two globals
+ * @require globalVar -> v1 * globalVar2 -> v2
+ * @ensure globalVar -> v2 * globalVar2 -> v1
+ */
+function swapGlobals_true(): void {
+  const temp: number = globalVar;
+  globalVar = globalVar2;
+  globalVar2 = temp;
+}
+
+// ========== NEGATIVE TESTS ==========
+
+/**
+ * Wrong increment spec: claims no change (should fail)
+ * @require globalVar -> v
+ * @ensure globalVar -> v
+ */
+function incrementWrong_false(): void {
+  globalVar = globalVar + 1;
+}
+
+/**
+ * Wrong add spec: claims wrong increment (should fail)
+ * @require globalVar -> v
+ * @ensure globalVar -> v + 20
+ */
+function addTenWrong_false(): void {
+  globalVar = globalVar + 10;
+}
+
+/**
+ * Wrong swap: claims values unchanged (should fail)
+ * @require globalVar -> v1 * globalVar2 -> v2
+ * @ensure globalVar -> v1 * globalVar2 -> v2
+ */
+function swapWrong_false(): void {
+  const temp: number = globalVar;
+  globalVar = globalVar2;
+  globalVar2 = temp;
 }

@@ -41,6 +41,44 @@ let rec match_points_to (ctx : biab_ctx) (ks1 : kappa list) (ks2 : kappa list) :
           let equalities = if t = t' then equalities else eq t t' :: equalities in
           k :: common, anti_frame, frame, equalities
       end
+  | RecordPointsTo (loc, fields) as k :: ks1 ->
+      (* Try to match on the record location *)
+      let match_record = function
+        | RecordPointsTo (loc', fields') when loc = loc' -> Some fields'
+        | _ -> None
+      in
+      begin match Lists.find_delete_map match_record ks2 with
+      | None ->
+          (* Record doesn't exist in RHS, add to frame *)
+          let common, anti_frame, frame, equalities = match_points_to ctx ks1 ks2 in
+          common, anti_frame, k :: frame, equalities
+      | Some (fields', ks2') ->
+          (* Generate equalities for matching fields *)
+          let field_eqs = fields |> List.filter_map (fun (fname, fval) ->
+            match List.assoc_opt fname fields' with
+            | None -> None (* Field not required on RHS *)
+            | Some fval' ->
+                if fval = fval' then None else Some (eq fval fval')
+          ) in
+          (* Fields in RHS but not in LHS become anti-frame *)
+          let missing_fields = fields' |> List.filter (fun (fname, _) ->
+            not (List.mem_assoc fname fields)
+          ) in
+          let common, anti_frame, frame, equalities = match_points_to ctx ks1 ks2' in
+          let anti_frame = match missing_fields with
+            | [] -> anti_frame
+            | _ -> RecordPointsTo (loc, missing_fields) :: anti_frame
+          in
+          (* Fields in LHS but not in RHS become frame *)
+          let extra_fields = fields |> List.filter (fun (fname, _) ->
+            not (List.mem_assoc fname fields')
+          ) in
+          let frame = match extra_fields with
+            | [] -> frame
+            | _ -> RecordPointsTo (loc, extra_fields) :: frame
+          in
+          k :: common, anti_frame, frame, field_eqs @ equalities
+      end
   | EmptyHeap :: _
   | SepConj _ :: _ -> failwith "match_points_to"
 

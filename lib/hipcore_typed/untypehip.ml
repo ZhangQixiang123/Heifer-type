@@ -184,9 +184,22 @@ let untype_sl_pred_def Typedhip.{p_sl_ex; p_sl_name; p_sl_params; p_sl_body} : H
     p_sl_params = List.map ident_of_binder p_sl_params;
     p_sl_body = untype_state p_sl_body }
 
-let untype_core_program Typedhip.{ cp_effs; cp_predicates; cp_sl_predicates; cp_lemmas; cp_methods } : Hiptypes.core_program =
+let untype_simple_spec Typedhip.{ss_precond; ss_postcond; ss_ex; ss_fa} : Hiptypes.simple_spec =
+  { ss_precond = Option.map untype_state ss_precond;
+    ss_postcond = untype_state ss_postcond;
+    ss_ex = List.map ident_of_binder ss_ex;
+    ss_fa = List.map ident_of_binder ss_fa }
+
+let untype_simple_meth_def Typedhip.{sm_name; sm_params; sm_spec; sm_body} : Hiptypes.simple_meth_def =
+  { sm_name;
+    sm_params = List.map ident_of_binder sm_params;
+    sm_spec = Option.map untype_simple_spec sm_spec;
+    sm_body = untype_core_lang sm_body }
+
+let untype_core_program Typedhip.{ cp_effs; cp_predicates; cp_sl_predicates; cp_lemmas; cp_methods; cp_simple_methods } : Hiptypes.core_program =
   { cp_effs;
     cp_predicates = SMap.map untype_pred_def cp_predicates;
     cp_sl_predicates = SMap.map untype_sl_pred_def cp_sl_predicates;
     cp_lemmas = SMap.map untype_lemma cp_lemmas;
-    cp_methods = List.map untype_meth_def cp_methods }
+    cp_methods = List.map untype_meth_def cp_methods;
+    cp_simple_methods = List.map untype_simple_meth_def cp_simple_methods }

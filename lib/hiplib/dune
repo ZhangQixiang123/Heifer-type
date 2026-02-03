@@ -2,6 +2,6 @@
  (name hiplib)
  (public_name heifer.hiplib)
  (modules hiplib tests)
- (libraries ocamlfrontend ocaml_compiler utils hipprover hipcore)
+ (libraries ocamlfrontend ocaml_compiler utils hipprover hipcore seplogic)
  (inline_tests)
  (preprocess (pps ppx_expect)))

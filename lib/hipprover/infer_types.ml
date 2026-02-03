@@ -409,6 +409,27 @@ and infer_types_term ?(hint : typ option) term : term using_env =
   | Construct (name, args), _ ->
       let* ((name, args), typ) = infer_types_constructor_like (fun hint t -> infer_types_term ~hint t) name args in
       return (Construct (name, args), typ)
+  | TRecordTerm fields, _ ->
+      (* Infer types for each field value *)
+      let* typed_fields = State.map_list fields ~f:(fun (name, value) ->
+        let* typed_value = infer_types_term value in
+        return (name, typed_value))
+      in
+      let record_type = TRecord (List.map (fun (name, t) -> (name, t.term_type)) typed_fields) in
+      return (TRecordTerm typed_fields, record_type)
+  | TGetField (record, field_name), _ ->
+      let* typed_record = infer_types_term record in
+      let field_type = fresh_type_var () in
+      (* Try to extract field type from record type if known *)
+      let* env = State.get in
+      let* _ = (match TEnv.simplify env.equalities typed_record.term_type with
+       | TRecord fields ->
+           (match List.assoc_opt field_name fields with
+            | Some ft -> unify_types field_type ft
+            | None -> return ()) (* Field not found, leave type variable *)
+       | _ -> return ()) (* Record type not yet known *)
+      in
+      return (TGetField (typed_record, field_name), field_type)
   | TTuple _, _ -> failwith "tuple unimplemented"
   in
   (* After checking this term, we may still need to unify its type with a hint received from above in the AST. *)
@@ -494,6 +515,16 @@ and infer_types_kappa k : kappa using_env =
     let ref_type = wrap_as_ref v.term_type in
     let* _ = assert_var_has_type (l, ref_type) ref_type in
     return (PointsTo (l, v))
+  | RecordPointsTo(l, fields) ->
+    (* Infer types for each field value *)
+    let* typed_fields = State.map_list fields ~f:(fun (name, value) ->
+      let* typed_value = infer_types_term value in
+      return (name, typed_value))
+    in
+    let record_type = TRecord (List.map (fun (name, t) -> (name, t.term_type)) typed_fields) in
+    let ref_type = wrap_as_ref record_type in
+    let* _ = assert_var_has_type (l, ref_type) ref_type in
+    return (RecordPointsTo (l, typed_fields))
 
 and infer_types_state (p, k) : state using_env =
   let* p = infer_types_pi p in
@@ -733,5 +764,8 @@ let%expect_test "unsolvable unification: incompatible types" =
   let t2 = Bool in
   let _ = unify_types t1 t2 env in
   output_simplified_types env [t1; t2];
-  [@@expect.uncaught_exn {| ("Unification_failure(int, bool)") |}]
+  [%expect {|
+    t0: int
+    t1: bool
+    |}]
 

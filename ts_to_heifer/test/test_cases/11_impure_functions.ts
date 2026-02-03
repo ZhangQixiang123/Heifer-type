@@ -5,64 +5,103 @@
 // Global counter
 let globalCounter: number = 0;
 
-// Function that reads global state
-function getCounter(): number {
+/**
+ * Read global state
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v /\ res = v
+ */
+function getCounter_true(): number {
   return globalCounter;
 }
 
-// Function that modifies global state
-function incrementCounter(): void {
+/**
+ * Modify global state: increment by 1
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v + 1
+ */
+function incrementCounter_true(): void {
   globalCounter = globalCounter + 1;
 }
 
-// Function that both reads and modifies global state
-function incrementAndReturn(): number {
+/**
+ * Read and modify: increment and return new value
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v + 1 /\ res = v + 1
+ */
+function incrementAndReturn_true(): number {
   globalCounter = globalCounter + 1;
   return globalCounter;
 }
 
-// Function with parameter and global state modification
-function addToCounter(x: number): void {
+/**
+ * Add parameter to global
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v + x
+ */
+function addToCounter_true(x: number): void {
   globalCounter = globalCounter + x;
-}
-
-// Function that conditionally modifies global state
-function incrementIfPositive(x: number): void {
-  if (x > 0) {
-    globalCounter = globalCounter + 1;
-  }
 }
 
 // Multiple global variables
 let total: number = 0;
 let count: number = 0;
 
-// Function modifying multiple globals
-function addToAverage(value: number): void {
+/**
+ * Modify two globals: add value and increment count
+ * @require total -> t * count -> c
+ * @ensure total -> t + value * count -> c + 1
+ */
+function addToAverage_true(value: number): void {
   total = total + value;
   count = count + 1;
 }
 
-// Function reading multiple globals
-function getAverage(): number {
-  if (count > 0) {
-    return total / count;
-  }
-  return 0;
-}
-
-// Global reference to demonstrate heap effects
+// Global for swap test
 let sharedValue: number = 42;
 
-// Function that swaps with global
-function swapWithGlobal(x: number): number {
-  const temp: number = sharedValue;
-  sharedValue = x;
-  return temp;
+/**
+ * Simple write: set global to parameter value
+ * @require sharedValue -> old
+ * @ensure sharedValue -> newVal
+ */
+function setSharedValue_true(newVal: number): void {
+  sharedValue = newVal;
 }
 
-// Nested function calls with global state
-function doubleIncrement(): void {
-  incrementCounter();
-  incrementCounter();
+/**
+ * Read and return global value
+ * @require sharedValue -> v
+ * @ensure sharedValue -> v /\ res = v
+ */
+function getSharedValue_true(): number {
+  return sharedValue;
+}
+
+// ========== NEGATIVE TESTS ==========
+
+/**
+ * Wrong increment spec: claims no change (should fail)
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v
+ */
+function incrementCounter_wrong_false(): void {
+  globalCounter = globalCounter + 1;
+}
+
+/**
+ * Wrong read spec: claims different value (should fail)
+ * @require globalCounter -> v
+ * @ensure globalCounter -> v /\ res = 0
+ */
+function getCounter_wrong_false(): number {
+  return globalCounter;
+}
+
+/**
+ * Wrong write spec: claims value unchanged (should fail)
+ * @require sharedValue -> old
+ * @ensure sharedValue -> old
+ */
+function setSharedValue_wrong_false(newVal: number): void {
+  sharedValue = newVal;
 }

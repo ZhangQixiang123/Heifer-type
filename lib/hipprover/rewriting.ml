@@ -187,11 +187,33 @@ module Permutation = struct
     | Disjunction (s1, s2) ->
         let s1 = apply_staged_spec perm s1 in
         let s2 = apply_staged_spec perm s2 in
-        Sequence (s1, s2)
-    | RaisingEff _ ->
-        todo ()
-    | TryCatch _ ->
-        todo ()
+        Disjunction (s1, s2)
+    | RaisingEff (p, h, (eff, args), r) ->
+        let p = apply_pi perm p in
+        let h = apply_kappa perm h in
+        let args = apply_term_list perm args in
+        let r = apply_term perm r in
+        RaisingEff (p, h, (eff, args), r)
+    | TryCatch (p, h, (body, ((norm_var, norm_spec), eff_handlers)), r) ->
+        let p = apply_pi perm p in
+        let h = apply_kappa perm h in
+        let body = apply_staged_spec perm body in
+        let norm_var = apply_ident perm norm_var in
+        let norm_spec = apply_staged_spec perm norm_spec in
+        let eff_handlers = List.map (fun (eff_name, arg_opt, handler_spec) ->
+          let arg_opt = Option.map (apply_ident perm) arg_opt in
+          let handler_spec = apply_staged_spec perm handler_spec in
+          (eff_name, arg_opt, handler_spec)
+        ) eff_handlers in
+        let r = apply_term perm r in
+        TryCatch (p, h, (body, ((norm_var, norm_spec), eff_handlers)), r)
+    | Multi (s1, s2) ->
+        let s1 = apply_staged_spec perm s1 in
+        let s2 = apply_staged_spec perm s2 in
+        Multi (s1, s2)
+    | Assume s' ->
+        let s' = apply_staged_spec perm s' in
+        Assume s'
 
   and apply_pi (perm : t) (p : pi) : pi =
     match p with
@@ -226,6 +248,10 @@ module Permutation = struct
         let t1 = apply_term perm t1 in
         let t2 = apply_term perm t2 in
         Subsumption (t1, t2)
+    | Colon (x, t) ->
+        let x = apply_ident_uvar perm x in
+        let t = apply_term perm t in
+        Colon (x, t)
 
   and apply_kappa (perm : t) (k : kappa) : kappa =
     match k with
@@ -235,6 +261,10 @@ module Permutation = struct
         let l = apply_ident_uvar perm l in
         let v = apply_term perm v in
         PointsTo (l, v)
+    | RecordPointsTo (l, fields) ->
+        let l = apply_ident_uvar perm l in
+        let fields = List.map (fun (fname, fval) -> (fname, apply_term perm fval)) fields in
+        RecordPointsTo (l, fields)
     | SepConj (k1, k2) ->
         let k1 = apply_kappa perm k1 in
         let k2 = apply_kappa perm k2 in
@@ -278,6 +308,14 @@ module Permutation = struct
         TLambda (id, xs, s_opt, c_opt)
     | TTuple _ ->
         todo ()
+    | TRecordTerm fields ->
+        let fields = List.map (fun (name, value) -> (name, apply_term perm value)) fields in
+        TRecordTerm fields
+    | TGetField (record, field_name) ->
+        let record = apply_term perm record in
+        TGetField (record, field_name)
+    | Type t ->
+        Type t
 end
 
 let instantiate_uvar (st : UF.store) (e : umap) (x : string) : uterm =
@@ -655,6 +693,16 @@ and unify_type : UF.store -> typ unif -> typ unif -> unit option =
         let* _ = unify_var st (Type src1, e1) (Type src2, e2) in
         let* _ = unify_var st (Type dst1, e1) (Type dst2, e2) in
         Some ()
+    (* case for record types - unify field by field *)
+    | TRecord fields1, TRecord fields2 ->
+        if List.length fields1 <> List.length fields2 then None
+        else
+          let unify_field (name1, typ1) (name2, typ2) =
+            if name1 <> name2 then None
+            else unify_var st (Type typ1, e1) (Type typ2, e2)
+          in
+          let* _ = sequence2 (fun (f1, f2) -> unify_field f1 f2) fields1 fields2 in
+          Some ()
     (* case when there is nothing to unify *)
     | _, Any | Any, _ -> Some ()
     | t1, t2 when t1 = t2 -> Some ()
@@ -802,8 +850,36 @@ and unify_staged :
     let* _ = unify_var st (Staged f1, e1) (Staged f3, e2) in
     let* _ = unify_var st (Staged f2, e1) (Staged f4, e2) in
     Some ()
-  | RaisingEff _, RaisingEff _ -> failwith "unimplemented RaisingEff"
-  | TryCatch _, TryCatch _ -> failwith "unimplemented TryCatch"
+  | RaisingEff (p1, h1, (eff1, args1), r1), RaisingEff (p2, h2, (eff2, args2), r2) when eff1 = eff2 ->
+    let* _ = unify_var st (Pure p1, e1) (Pure p2, e2) in
+    let* _ = unify_var st (Heap h1, e1) (Heap h2, e2) in
+    let* _ = unify_var st (Term r1, e1) (Term r2, e2) in
+    if List.length args1 <> List.length args2 then None
+    else
+      let* _ = sequence2 (fun (a1, a2) -> unify_var st (Term a1, e1) (Term a2, e2)) args1 args2 in
+      Some ()
+  | TryCatch (p1, h1, (body1, ((nv1, ns1), hs1)), r1), TryCatch (p2, h2, (body2, ((nv2, ns2), hs2)), r2) ->
+    let* _ = unify_var st (Pure p1, e1) (Pure p2, e2) in
+    let* _ = unify_var st (Heap h1, e1) (Heap h2, e2) in
+    let* _ = unify_var st (Staged body1, e1) (Staged body2, e2) in
+    let* _ = unify_var st (Staged ns1, e1) (Staged ns2, e2) in
+    let* _ = unify_var st (Term r1, e1) (Term r2, e2) in
+    (* Check that handlers match structurally *)
+    if List.length hs1 <> List.length hs2 then None
+    else if nv1 <> nv2 then None
+    else
+      let* _ = sequence2 (fun ((eff1, _arg1, spec1), (eff2, _arg2, spec2)) ->
+        if eff1 <> eff2 then None
+        else unify_var st (Staged spec1, e1) (Staged spec2, e2)
+      ) hs1 hs2 in
+      Some ()
+  | Multi (f1, f2), Multi (f3, f4) ->
+    let* _ = unify_var st (Staged f1, e1) (Staged f3, e2) in
+    let* _ = unify_var st (Staged f2, e1) (Staged f4, e2) in
+    Some ()
+  | Assume f1, Assume f2 ->
+    let* _ = unify_var st (Staged f1, e1) (Staged f2, e2) in
+    Some ()
   | _, _ -> None
 
 let unify store t1 t2 =
