@@ -431,10 +431,15 @@ let rec forward (env: fvenv) (expr : core_lang): staged_spec * fvenv =
             let field_var = fresh_variable ~v:("field_" ^ field_name) () in
             (field_name, var ~typ:field_expr.core_type field_var)
       ) fields in
-      (* Create spec: allocate record and return pointer to it *)
+      (* Per-field decomposition: each field is a separate PointsTo *)
+      let field_heap = List.fold_left (fun acc (fname, fterm) ->
+        let cell = PointsTo (loc_var ^ "." ^ fname, fterm) in
+        match acc with
+        | EmptyHeap -> cell
+        | _ -> SepConj (acc, cell)
+      ) EmptyHeap field_terms in
       Exists (loc,
-              NormalReturn (res_eq (var_of_binder loc),
-                            RecordPointsTo (loc_var, field_terms))), env
+              NormalReturn (res_eq (var_of_binder loc), field_heap)), env
   | CGetField (record_expr, field_name) ->
       (* Read a field from a heap-allocated record *)
       let record_spec, env = forward env record_expr in
@@ -577,14 +582,60 @@ let call_primitive_type fname actualArgs (st:pi*kappa) =
   | _ ->
     failwith (Format.asprintf "unknown primitive: %s, args: %s" fname (string_of_list string_of_term actualArgs))  
 
-let check_subtyps t_l t_r right post= 
-     let t1 = get_type_from_terms t_l.term_desc in 
-     let t2 = get_type_from_terms t_r.term_desc in 
-    let r = 
-                   try 
-                   is_subtype t1 t2 
+(** Flexibly extract a type from a term_desc.
+    Handles both Type(...) terms and value terms like Const, Var. *)
+let get_type_flexible t =
+  match t with
+  | Type x -> x
+  | Const c -> BaseTy (Consta c)
+  | Var v -> BaseTy (Tvar v)
+  | _ -> failwith "get_type_flexible: not a type-convertible term"
+
+(** Compare two PointsTo values, handling the mismatch between
+    analyze_type_spec's Ref-wrapped types and spec's raw values.
+    E.g., Type(Defty("Ref",[Consta(Num 42)])) matches Const(Num 42). *)
+let heap_values_match (left_term : term) (right_term : term) : bool =
+  (* First try structural equality *)
+  if left_term = right_term then true
+  else
+    (* Try matching Ref-wrapped left with raw right *)
+    match left_term.term_desc, right_term.term_desc with
+    | Type (BaseTy (Defty ("Ref", [inner]))), _ ->
+        let right_ty = (try Some (get_type_flexible right_term.term_desc) with _ -> None) in
+        (match right_ty with
+         | Some rty -> (try is_subtype inner rty with _ -> false)
+         | None -> false)
+    | _, Type (BaseTy (Defty ("Ref", [inner]))) ->
+        let left_ty = (try Some (get_type_flexible left_term.term_desc) with _ -> None) in
+        (match left_ty with
+         | Some lty -> (try is_subtype lty inner with _ -> false)
+         | None -> false)
+    | Type t1, _ ->
+        let right_ty = (try Some (get_type_flexible right_term.term_desc) with _ -> None) in
+        (match right_ty with
+         | Some rty -> (try is_subtype t1 rty with _ -> false)
+         | None -> false)
+    | _, Type t2 ->
+        let left_ty = (try Some (get_type_flexible left_term.term_desc) with _ -> None) in
+        (match left_ty with
+         | Some lty -> (try is_subtype lty t2 with _ -> false)
+         | None -> false)
+    | _ -> false
+
+let check_subtyps t_l t_r right post=
+     let t1 = get_type_flexible t_l.term_desc in
+     let t2 = get_type_flexible t_r.term_desc in
+     (* Unwrap Ref wrapper: in analyze_type_spec, CWrite stores values as
+        Defty("Ref",[inner_type]) but spec uses raw values. *)
+     let t1 = match t1 with
+       | BaseTy (Defty ("Ref", [inner])) -> inner
+       | _ -> t1
+     in
+    let r =
+                   try
+                   is_subtype t1 t2
                    with Unification (_a,b) -> ( right := unify_var_name_in_state b t_l !right; post := unify_var_name_in_state b t_l !post; true)
-                   in 
+                   in
                    r
 let remove_from_residue_kappa (f:pi*kappa) (t:kappa) = 
   let rec remove kappa =
@@ -609,20 +660,22 @@ let entail_type (left_ori:pi*kappa) (right_ori:staged_spec) mapping =
   match maplist with
   | [] -> (true)
 
-  | (a,p) :: xs -> 
-                   let type_term_l =  (find_in_state a !left) in 
-                   try 
-                   let type_term_r =  (find_in_state p !right) in 
-                   
+  | (a,p) :: xs ->
+                   (try
+                   let type_term_l =  (find_in_state a !left) in
+                   (try
+                   let type_term_r =  (find_in_state p !right) in
 
-                   (match (type_term_l,type_term_r) with 
-                   | (("s",t1),("s",t2)) -> let res = check_subtyps (snd t1) (snd t2) right post in 
+
+                   (match (type_term_l,type_term_r) with
+                   | (("s",t1),("s",t2)) -> let res = check_subtyps (snd t1) (snd t2) right post in
                    if res then res && check_local xs else false
-                   |(("h",t1),("h",t2)) -> let res = check_subtyps (snd t1) (snd t2) right post in 
+                   |(("h",t1),("h",t2)) -> let res = check_subtyps (snd t1) (snd t2) right post in
                    if res then (remove_list_1 := t1::!remove_list_1;remove_list_2 := t2::!remove_list_2; (res && check_local xs)) else false
                    | _ -> failwith "to be implemented"
-                   ) 
-                  with Stateerror _ ->  (true && check_local xs) 
+                   )
+                  with Stateerror _ ->  (true && check_local xs))
+                  with Stateerror _ -> (true && check_local xs))
                   in 
   let process_one =check_local mapping in 
   if not process_one then raise (Entailfail "entail fail in process one")
@@ -636,7 +689,14 @@ let entail_type (left_ori:pi*kappa) (right_ori:staged_spec) mapping =
     |SepConj (a,b) -> check_remaining a && check_remaining b
     | EmptyHeap -> true
     | PointsTo (a,b) -> let r = find_in_state a !left in
-                        if (fst r) = "s" then false else if (PointsTo (a,b) = PointsTo (fst (snd r), snd (snd r))) then (remove_list_3 := (snd r)::!remove_list_3;true) else false
+                        if (fst r) = "s" then false
+                        else if (PointsTo (a,b) = PointsTo (fst (snd r), snd (snd r))) then
+                          (remove_list_3 := (snd r)::!remove_list_3;true)
+                        else
+                          (* Flexible match: handle Type/Const and Ref-wrapped mismatches *)
+                          if heap_values_match (snd (snd r)) b then
+                            (remove_list_3 := (snd r)::!remove_list_3;true)
+                          else false
     | RecordPointsTo (a, fields) ->
         (* For record points-to, check if we can find a matching record in the left state *)
         let r = find_in_state a !left in
@@ -769,94 +829,251 @@ let rec normal_pi p_ori p =
     | Colon (a, x) -> Colon (a, normal_term x (p_ori))
     | And (a,b) -> And (normal_pi p_ori a, normal_pi p_ori b)
     | _ -> p
-let analyze_type_spec (spec:staged_spec) (meth:meth_def) (prog:core_program):  (staged_spec ) = 
-   
-  let _binders, (init_state,postcondition) = find_all_binders spec in
-    (* list_printer print_endline (List.fold_right (fun a r -> (fst a)::r) binders []); *)
-  let rec forward state (body:core_lang_desc) : (staged_spec) = 
-    (* let () = print_endline (string_of_staged_spec (Require (fst state, snd state))) in *)
-    match body with
-  | CValue v ->constant_to_singleton_type_re v state
-  | CLet (x, expr1, expr2) -> 
-    let res = forward state expr1.core_desc in
-    let current_state = extract_return res in 
+(** Extract type narrowing from a typeof condition.
+    typeof(x) = "number" adds Colon(x, Int) to the state.
+    typeof(x) = "string" adds Colon(x, TyString) to the state.
+    typeof(x) = "boolean" adds Colon(x, Bool) to the state. *)
+let narrow_by_typeof (cond : pi) (state : pi * kappa) : pi * kappa =
+  match cond with
+  | Atomic (EQ, lhs, rhs) ->
+      let typeof_var = match lhs.term_desc with
+        | TApp ("typeof", [{term_desc = Var x; _}]) -> Some x
+        | _ -> None
+      in
+      let type_name = match rhs.term_desc with
+        | Const (TStr s) -> Some s
+        | _ -> None
+      in
+      (match typeof_var, type_name with
+       | Some x, Some "number" ->
+           (And (fst state, Colon (x, {term_desc = Type (BaseTy IntBty); term_type = Int})), snd state)
+       | Some x, Some "string" ->
+           (And (fst state, Colon (x, {term_desc = Type (BaseTy TyStringBty); term_type = TyString})), snd state)
+       | Some x, Some "boolean" ->
+           (And (fst state, Colon (x, {term_desc = Type (BaseTy BoolBty); term_type = Bool})), snd state)
+       | _ -> state)
+  | _ -> state
+
+(** Narrow state for the else-branch of a typeof condition.
+    typeof(x) != "number" adds Colon(x, Neg(Int)) to the state. *)
+let narrow_by_typeof_neg (cond : pi) (state : pi * kappa) : pi * kappa =
+  match cond with
+  | Atomic (EQ, lhs, rhs) ->
+      let typeof_var = match lhs.term_desc with
+        | TApp ("typeof", [{term_desc = Var x; _}]) -> Some x
+        | _ -> None
+      in
+      let type_name = match rhs.term_desc with
+        | Const (TStr s) -> Some s
+        | _ -> None
+      in
+      (match typeof_var, type_name with
+       | Some x, Some "number" ->
+           (And (fst state, Colon (x, {term_desc = Type (Neg (BaseTy IntBty)); term_type = Any})), snd state)
+       | Some x, Some "string" ->
+           (And (fst state, Colon (x, {term_desc = Type (Neg (BaseTy TyStringBty)); term_type = Any})), snd state)
+       | Some x, Some "boolean" ->
+           (And (fst state, Colon (x, {term_desc = Type (Neg (BaseTy BoolBty)); term_type = Any})), snd state)
+       | _ -> state)
+  | _ -> state
+
+(** Extract state from any staged_spec result (NormalReturn, Require, or Disjunction) *)
+let extract_state (s:staged_spec) = match s with
+  | NormalReturn (a,b) -> (a,b)
+  | Require (a,b) -> (a,b)
+  | _ -> failwith "extract_state: expected NormalReturn or Require"
+
+(** Forward analysis engine: runs forward symbolic execution on a method body.
+    Extracted from analyze_type_spec so both spec-based and spec-free paths can share it.
+    @param prog The program context (for looking up callee specs)
+    @param state The initial state (pi, kappa)
+    @param body The method body to analyze
+    @return The resulting staged_spec after symbolic execution *)
+let rec forward_flow (prog:core_program) (state:pi*kappa) (body:core_lang_desc) : staged_spec =
+  match body with
+  | CValue v -> constant_to_singleton_type_re v state
+  | CLet (x, expr1, expr2) ->
+    let res = forward_flow prog state expr1.core_desc in
+    let current_state = extract_return res in
     let old_var = fresh_variable () in
     let change_x_to_old_x = swap_var_name_in_state (fst x) old_var current_state in
-    let new_state = swap_var_name_in_state "res" (fst x) change_x_to_old_x in 
-    forward new_state expr2.core_desc
+    let new_state = swap_var_name_in_state "res" (fst x) change_x_to_old_x in
+    forward_flow prog new_state expr2.core_desc
 
   | CFunCall (name, args) when List.mem name primitive_functions ->
       call_primitive_type name args state
   | CFunCall (name, args) ->
-
-     let spec_table = prog.cp_predicates in 
-     let spec_details = SMap.find name spec_table in 
-     let spec = spec_details.p_body in 
-     let parameters =  spec_details.p_params in
-     let args = List.fold_right (fun x acc -> acc @ [get_var_name_from_terms x]) args [] in
-     let parameters = List.fold_right (fun x acc -> acc @ [fst x]) parameters [] in
-     let mappings = arg_mapping args parameters in 
-     let (residue,result) = entail_type state  spec mappings in
+     let spec_table = prog.cp_predicates in
+     let spec_details = SMap.find name spec_table in
+     let spec = spec_details.p_body in
+     let parameters = spec_details.p_params in
+     let param_names = List.fold_right (fun x acc -> acc @ [fst x]) parameters [] in
+     (* Build mapping: only include arguments that are variables.
+        Constant arguments (string literals, numbers, etc.) are skipped
+        since they aren't in the state and don't need heap matching. *)
+     let rec build_mappings a p =
+       match a, p with
+       | [], _ | _, [] -> []
+       | arg :: rest_a, param :: rest_p ->
+           (match arg.term_desc with
+            | Var v -> (v, param) :: build_mappings rest_a rest_p
+            | _ -> build_mappings rest_a rest_p)
+     in
+     let mappings = build_mappings args param_names in
+     let (residue,result) = entail_type state spec mappings in
      NormalReturn (And (fst residue,fst result), SepConj (snd residue,snd result))
-                 
 
-  | CWrite (x, t) -> let r = find_in_state x  state in 
-                     if (fst r) = "h" then let r = swap_content_in_state x {term_desc = Type (BaseTy (Defty ("Ref",[map_ter_to_ty t])));term_type = t.term_type} state in 
+  | CWrite (x, t) -> let r = find_in_state x state in
+                     if (fst r) = "h" then let r = swap_content_in_state x {term_desc = Type (BaseTy (Defty ("Ref",[map_ter_to_ty t])));term_type = t.term_type} state in
                      Require (fst r, snd r)
-               else 
+               else
                 (try
                   (if (is_subtype (BaseTy (Defty ("Ref",[(map_ter_to_ty t)])))  (get_type_from_terms (snd (snd r)).term_desc)
                 ) then Require (fst state, snd state) else failwith "cannot change colon type"  )
                 with Unification (_,_) -> (
-                  
                   failwith "cannot write to type vars"
-                  (* let st = unify_var_name_in_state b t state in 
-                    Require (fst st, snd st) *)
-                    
                     ))
   | CRef t ->
       let x = Typed_core_ast.map_ter_to_ty t in
        NormalReturn (fst state, SepConj (snd state, PointsTo ("res", {term_desc = Type (BaseTy (Defty ("Ref",[x]))); term_type = t.term_type})))
-  | CRead x -> 
-      let r = find_in_state x  state in
-      if (fst r) = "h" then 
+  | CRead x ->
+      let r = find_in_state x state in
+      if (fst r) = "h" then
                 let ch_var = (return_ref_value (snd (snd r))) in
                 (if fst ch_var then
                 NormalReturn (And (fst state, res_eq (snd ch_var)), snd state)
                 else NormalReturn (And (fst state,Colon ("res", (snd ch_var))), snd state)
-                ) 
-               else NormalReturn (And (fst state,Colon ("res", (snd (snd r)))), snd state) 
+                )
+               else NormalReturn (And (fst state,Colon ("res", (snd (snd r)))), snd state)
   (* effect start *)
   (* match e with | eff case... | constr case... *)
-  | CMatch (_, _, discriminant, _, cases) -> 
+  | CMatch (_, _, discriminant, _, cases) ->
     (*currently assume match always working on var*)
     (try
-    let case_var = extract_case_var discriminant in 
+    let case_var = extract_case_var discriminant in
     let (r1,r2) = choose_case_for_match state case_var cases in
-    forward r2 r1.core_desc
-    with Nomatch -> 
-       NormalReturn (And (fst state,Colon ("res", {term_type = Any;term_desc = Type (BaseTy (Defty ("Abtr",[])))})), snd state) 
+    forward_flow prog r2 r1.core_desc
+    with Nomatch ->
+       NormalReturn (And (fst state,Colon ("res", {term_type = Any;term_desc = Type (BaseTy (Defty ("Abtr",[])))})), snd state)
       )
+  | CSequence (expr1, expr2) ->
+      let res1 = forward_flow prog state expr1.core_desc in
+      let s1 = extract_state res1 in
+      forward_flow prog s1 expr2.core_desc
+
+  | CIfElse (cond, then_expr, else_expr) ->
+      (* Add condition to state for each branch *)
+      let then_state = (And (fst state, cond), snd state) in
+      let else_state = (And (fst state, Not cond), snd state) in
+      (* Apply typeof narrowing if the condition is a typeof check *)
+      let then_state = narrow_by_typeof cond then_state in
+      let else_state = narrow_by_typeof_neg cond else_state in
+      let r1 = forward_flow prog then_state then_expr.core_desc in
+      let r2 = forward_flow prog else_state else_expr.core_desc in
+      Disjunction (r1, r2)
+
   | CLambda _ -> failwith "to be implemented CLambda"
   | _ -> failwith "not supported expressions"
-  in 
-  let rs = forward (remove_req init_state) meth.m_body.core_desc in 
+
+let analyze_type_spec (spec:staged_spec) (meth:meth_def) (prog:core_program):  (staged_spec ) =
+
+  let _binders, (init_state,postcondition) = find_all_binders spec in
+  let rs = forward_flow prog (remove_req init_state) meth.m_body.core_desc in
   (* print_endline (string_of_staged_spec (rs)); *)
-  let post = (make_post_state rs) in 
-  let postcondition = (make_post postcondition) in
-  let map_args =   (make_list_map (List.fold_right (fun x acc -> acc @ [fst x]) meth.m_params ["res"])) in
-  try
-  let _check_post = entail_type post postcondition map_args in
+  let postcondition_spec = (make_post postcondition) in
+  let map_args = (make_list_map (List.fold_right (fun x acc -> acc @ [fst x]) meth.m_params ["res"])) in
+  (* Check postcondition, handling Disjunction results from CIfElse *)
+  let rec check_post_disjunctive result =
+    match result with
+    | Disjunction (r1, r2) ->
+        check_post_disjunctive r1;
+        check_post_disjunctive r2
+    | _ ->
+        let post = (make_post_state result) in
+        (try
+          let _check_post = entail_type post postcondition_spec map_args in
+          ()
+        with Entailfail _ ->
+          let normalised_state = (normal_pi (fst post) (fst post), snd post) in
+          let _check_post = entail_type normalised_state postcondition_spec map_args in
+          ())
+  in
+  check_post_disjunctive rs;
   rs
-  with Entailfail _ -> (
-     (* print_endline (string_of_pi (fst post)); *)
 
-    let normalised_state = (normal_pi (fst post) (fst post), snd post) in 
-    (* print_endline (string_of_staged_spec (Require (fst normalised_state, snd normalised_state))); *)
-    let _check_post = entail_type normalised_state postcondition map_args in
-    rs
 
-  )
+(** Spec-free flow analysis for methods with Ref parameters.
+    Builds initial state from Ref parameter types, runs forward analysis,
+    checks return type compatibility, and produces a synthetic spec.
+
+    This enables verification of programs that TypeScript rejects due to
+    invariant container types (e.g., Ref<number|string> cannot be narrowed
+    to Ref<number>), without requiring any user-written specifications.
+
+    @param meth The method to analyze
+    @param prog The program context (callee specs must already be in cp_predicates)
+    @return The synthetic staged_spec encoding the method's behavior *)
+let analyze_flow (meth:meth_def) (prog:core_program) : staged_spec =
+  (* 1. Identify Ref params from declared types *)
+  let ref_params = List.filter_map (fun (name, typ) ->
+    match typ with TConstr ("ref", _) -> Some name | _ -> None
+  ) meth.m_params in
+  if ref_params = [] then failwith "analyze_flow: no Ref params";
+
+  (* 2. Build initial state: each Ref param -> PointsTo with fresh var *)
+  let fresh_vars = List.map (fun name ->
+    (name, fresh_variable ())
+  ) ref_params in
+  let init_heap = List.fold_right (fun (name, fv) acc ->
+    SepConj (PointsTo (name, {term_desc = Var fv; term_type = Any}), acc)
+  ) fresh_vars EmptyHeap in
+  let init_state = (True, init_heap) in
+
+  (* 3. Run forward analysis *)
+  let rs = forward_flow prog init_state meth.m_body.core_desc in
+
+  (* 4. Check return type compatibility *)
+  let ret_type = meth.m_body.core_type in
+  if ret_type <> Unit then begin
+    let rec check_return_disjunctive result =
+      match result with
+      | Disjunction (r1, r2) ->
+          check_return_disjunctive r1;
+          check_return_disjunctive r2
+      | _ ->
+          let result_pi = match result with
+            | NormalReturn (pi, _) | Require (pi, _) -> pi
+            | _ -> failwith "analyze_flow: unexpected result form"
+          in
+          (* Search right-first: And is left-nested, so the rightmost
+             Colon("res", ...) is the most recent assignment *)
+          let rec find_res_type pi = match pi with
+            | Colon ("res", t) -> Some t
+            | And (a, b) -> (match find_res_type b with Some t -> Some t | None -> find_res_type a)
+            | Atomic (EQ, {term_desc = Var "res"; _}, v) -> Some v
+            | _ -> None
+          in
+          match find_res_type result_pi with
+          | Some res_term ->
+              let res_ty = get_type_from_terms res_term.term_desc in
+              let ret_ty = map_typ_to_ty ret_type in
+              if not (try is_subtype res_ty ret_ty with _ -> false) then
+                failwith "analyze_flow: return type mismatch"
+          | None -> ()  (* No res type info — void or flexible *)
+    in
+    check_return_disjunctive rs
+  end;
+
+  (* 5. Package as synthetic spec for callers *)
+  let ensure_normal_return s = match s with
+    | NormalReturn _ -> s
+    | Require (pi, kappa) -> NormalReturn (pi, kappa)
+    | Disjunction _ -> s
+    | _ -> s
+  in
+  let binders = List.map (fun (_, fv) -> (fv, Any)) fresh_vars in
+  List.fold_right (fun b s -> ForAll (b, s)) binders
+    (Sequence (Require (True, init_heap), ensure_normal_return rs))
 
 
 (* let unify_ty (f:staged_spec) (var:string) (target:string) =

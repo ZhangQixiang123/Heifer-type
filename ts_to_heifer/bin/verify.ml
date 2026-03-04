@@ -39,14 +39,47 @@ let ext_to_meth_def em =
     m_tactics = em.em_tactics;
   }
 
-(** Verify a method using Heifer's forward rules *)
+(** Verify a method using Heifer's forward rules.
+    Returns (inferred_spec option, success, error option, flow_spec option).
+    flow_spec is Some when Tier 2 flow analysis produced a synthetic spec. *)
 let verify_method prog meth =
   try
-    let inferred_spec, result = Hiplib.infer_and_check_method prog meth meth.m_spec in
-    (Some inferred_spec, result, None)
+    (* Tier 1: Has spec? → analyze_type_spec (full value-level proof) *)
+    let type_spec_ok = match meth.m_spec with
+      | Some spec ->
+          (try
+            let _r = Hipprover.Forward_rules.analyze_type_spec spec meth prog in
+            true
+          with _e ->
+            false)
+      | None -> false
+    in
+    if type_spec_ok then
+      (meth.m_spec, true, None, None)
+    else
+      (* Tier 2: No spec + has Ref params? → analyze_flow (spec-free) *)
+      let has_ref_params = List.exists (fun (_, typ) ->
+        match typ with Hipcore_typed.Typed_core_ast.TConstr ("ref", _) -> true | _ -> false
+      ) meth.m_params in
+      let flow_ok, flow_spec = if meth.m_spec = None && has_ref_params then
+        (try
+          let syn_spec = Hipprover.Forward_rules.analyze_flow meth prog in
+          (true, Some syn_spec)
+        with _e ->
+          (false, None))
+      else
+        (false, None)
+      in
+      if flow_ok then
+        (flow_spec, true, None, flow_spec)
+      else begin
+        (* Tier 3: Fallback → infer_and_check_method (general entailment) *)
+        let inferred_spec, result = Hiplib.infer_and_check_method prog meth meth.m_spec in
+        (Some inferred_spec, result, None, None)
+      end
   with
-  | Failure msg -> (None, false, Some msg)
-  | e -> (None, false, Some (Printexc.to_string e))
+  | Failure msg -> (None, false, Some msg, None)
+  | e -> (None, false, Some (Printexc.to_string e), None)
 
 (** Verify a method with case-based specification.
 
@@ -60,13 +93,13 @@ let verify_case_method _prog em =
   | Some case_spec ->
       try
         (* Convert case_spec to sl_spec_case for entailment checking *)
-        let sl_case_spec = Seplogic.Sl_lib.sl_spec_case_of_hiptypes case_spec in
+        let sl_case_spec = Hipprover.Sl_lib.sl_spec_case_of_hiptypes case_spec in
 
         (* Extract parameter names from function signature *)
         let param_names = List.map fst em.em_params in
 
         (* Step 1: Check case coverage *)
-        (match Seplogic.Sl_entail.check_case_coverage param_names sl_case_spec.case_branches with
+        (match Hipprover.Sl_entail.check_case_coverage param_names sl_case_spec.case_branches with
         | Some missing_msg ->
             (* Incomplete coverage - missing aliased case *)
             (None, false, Some ("Incomplete case coverage: " ^ missing_msg))
@@ -76,20 +109,20 @@ let verify_case_method _prog em =
             (* Create forward verification environment *)
             let methods_map = Utils.Hstdlib.SMap.empty in
             let pred_map = Utils.Hstdlib.SMap.empty in
-            let env = Seplogic.Sl_forward.create_env methods_map pred_map in
+            let env = Hipprover.Sl_forward.create_env methods_map pred_map in
 
             (* Step 2: Verify each case by assuming its precondition *)
-            let result = Seplogic.Sl_entail.verify_case_spec_with_forward
+            let result = Hipprover.Sl_entail.verify_case_spec_with_forward
               env sl_case_spec em.em_body in
 
             match result with
-            | Seplogic.Sl_entail.Valid ->
+            | Hipprover.Sl_entail.Valid ->
                 (None, true, None)
-            | Seplogic.Sl_entail.Invalid msg ->
+            | Hipprover.Sl_entail.Invalid msg ->
                 (None, false, Some msg))
       with
       | Failure msg -> (None, false, Some msg)
-      | Seplogic.Sl_types.Unsupported_feature msg ->
+      | Hipprover.Sl_types.Unsupported_feature msg ->
           (None, false, Some ("Unsupported feature: " ^ msg))
       | e -> (None, false, Some (Printexc.to_string e))
 
@@ -172,18 +205,24 @@ let () =
         Printf.printf "\nVerification:\n";
 
         (* Choose verification method based on spec type *)
-        let (inferred_opt, result, error_opt) =
+        let (inferred_opt, result, error_opt, flow_spec_opt) =
           match em.em_case_spec with
-          | Some _ -> verify_case_method !prog_ref em
+          | Some _ ->
+              let (i, r, e) = verify_case_method !prog_ref em in
+              (i, r, e, None)
           | None ->
               let meth = ext_to_meth_def em in
               verify_method !prog_ref meth
         in
 
-        (match inferred_opt with
-        | Some inferred ->
-            Printf.printf "  Inferred spec: %s\n" (string_of_staged_spec inferred);
-        | None -> ()
+        (match flow_spec_opt with
+        | Some syn_spec ->
+            Printf.printf "  Flow-inferred spec: %s\n" (string_of_staged_spec syn_spec);
+        | None ->
+            match inferred_opt with
+            | Some inferred ->
+                Printf.printf "  Inferred spec: %s\n" (string_of_staged_spec inferred);
+            | None -> ()
         );
 
         (match error_opt with
@@ -192,7 +231,10 @@ let () =
             Printf.printf "  Error: %s\n" err
         | None ->
             if result then begin
-              Printf.printf "  ✓ VERIFICATION PASSED\n";
+              (if flow_spec_opt <> None then
+                Printf.printf "  ✓ FLOW ANALYSIS PASSED\n"
+              else
+                Printf.printf "  ✓ VERIFICATION PASSED\n");
               Printf.printf "  Result: %b\n" result
             end
             else begin
@@ -203,7 +245,16 @@ let () =
 
         (* Add verified method to program for next iteration *)
         let meth = ext_to_meth_def em in
-        prog_ref := Hiplib.analyze_method !prog_ref meth;
+        (match flow_spec_opt with
+        | Some syn_spec ->
+            (* Store synthetic spec from flow analysis directly *)
+            let pred = Hipprover.Entail.derive_predicate_type
+              meth.m_name meth.m_params syn_spec in
+            let cp_predicates = Utils.Hstdlib.SMap.add
+              meth.m_name pred (!prog_ref).cp_predicates in
+            prog_ref := { !prog_ref with cp_predicates }
+        | None ->
+            prog_ref := Hiplib.analyze_method !prog_ref meth);
 
         Printf.printf "\n%s\n\n" (String.make 60 '=')
     ) ext_methods;

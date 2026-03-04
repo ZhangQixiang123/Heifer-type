@@ -6,4 +6,4 @@
 (executable
  (public_name ts_verify)
  (name verify)
- (libraries ts_to_heifer heifer.hiplib heifer.hipcore_typed heifer.seplogic heifer.hipcore))
+ (libraries ts_to_heifer heifer.hiplib heifer.hipcore_typed heifer.hipcore))

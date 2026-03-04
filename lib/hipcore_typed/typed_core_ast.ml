@@ -247,7 +247,7 @@ let rec check_two_base_types t1 t2=
     | (Bot,_)
     | (_,Top)
     -> true
-     | (a,Tyvar t) -> raise (Unification (a,t)) 
+     | (a,Tyvar t) | (a,Tvar t) -> raise (Unification (a,t))
     | (Defty (n1,l1),Defty (n2,l2)) -> if not (n1 = n2) then false else List.equal is_subtype l1 l2
     | (Top,_) -> false 
     | (_, AnyBty) -> true 

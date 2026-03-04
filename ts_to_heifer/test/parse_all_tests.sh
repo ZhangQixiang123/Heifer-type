@@ -9,7 +9,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 
 # Directories
-TEST_CASES_DIR="$SCRIPT_DIR/test_cases"
+TEST_CASES_DIR="$SCRIPT_DIR/test_cases/ts"
 AST_OUTPUT_DIR="$SCRIPT_DIR/ast_output"
 PARSER_SCRIPT="$PROJECT_ROOT/parser/dist/parser.js"
 

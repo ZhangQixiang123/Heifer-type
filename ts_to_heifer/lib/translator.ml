@@ -12,6 +12,13 @@ open Hipcore
 open Parsing
 open Hipcore_typed.Retypehip
 
+(* Maps type name → list of (field_name, param_index option) *)
+(* Some i = field references type parameter at index i; None = concrete type *)
+let ref_type_registry : (string, (string * int option) list) Hashtbl.t = Hashtbl.create 4
+
+(* Reverse lookup: lowercase internal name → original type name *)
+let ref_lowercase_to_name : (string, string) Hashtbl.t = Hashtbl.create 4
+
 type variance = Mutable | Immutable
 
 type context = {
@@ -381,6 +388,10 @@ let rec translate_type json =
     | "BooleanKeyword" -> Bool
     | "VoidKeyword" -> Unit
     | "AnyKeyword" -> Any
+    | "UnionType" ->
+        (* Union types map to Any in the core type system.
+           The actual union structure is preserved via translate_type_to_ty for specs. *)
+        Any
     | "TypeReference" ->
         (* Extract type name from typeName field *)
         let type_name =
@@ -392,17 +403,22 @@ let rec translate_type json =
             | [name_json] -> (try get_identifier name_json with _ -> "")
             | _ -> ""
         in
-        (* Check for Ref<T> pattern *)
-        if type_name = "Ref" then
+        (* Check for registered ref-like type (e.g. Ref<T>, Pair<A,B>) *)
+        if Hashtbl.mem ref_type_registry type_name then
+          let fields = Hashtbl.find ref_type_registry type_name in
           let type_args =
             try json |> member "typeArguments" |> to_list
             with _ -> []
           in
-          match type_args with
-          | [inner_type_json] ->
-              let inner_type = translate_type inner_type_json in
-              TConstr ("ref", [inner_type])
-          | _ -> TConstr ("ref", [Any])  (* Ref without type arg *)
+          let inner_types = List.map translate_type type_args in
+          if List.length fields = 1 then
+            (* Single-field: use internal "ref" name for CRead/CWrite path *)
+            match inner_types with
+            | [t] -> TConstr ("ref", [t])
+            | _ -> TConstr ("ref", [Any])
+          else
+            (* Multi-field: use actual type name *)
+            TConstr (String.lowercase_ascii type_name, inner_types)
         else
           Any  (* Other type references become Any *)
     | _ -> Any  (* Default to Any for unknown types *)
@@ -414,15 +430,89 @@ let is_ref_type typ =
   | TConstr ("ref", [inner]) -> Some inner
   | _ -> None
 
+(** Check if a field access is on a registered ref type *)
+let is_ref_field_access field_name obj_type =
+  match obj_type with
+  | TConstr (type_name, _) ->
+      let canonical =
+        match Hashtbl.find_opt ref_lowercase_to_name type_name with
+        | Some orig -> orig
+        | None -> type_name
+      in
+      (match Hashtbl.find_opt ref_type_registry canonical with
+       | Some fields -> List.exists (fun (fname, _) -> fname = field_name) fields
+       | None -> false)
+  | _ -> false
+
+(** Check if a registered type is single-field (uses CRead/CWrite path) *)
+let is_single_field_ref type_name =
+  let canonical =
+    match Hashtbl.find_opt ref_lowercase_to_name type_name with
+    | Some orig -> orig
+    | None -> type_name
+  in
+  match Hashtbl.find_opt ref_type_registry canonical with
+  | Some [_] -> true
+  | _ -> false
+
 (** Convert Heifer type to Hiptypes ty for specifications *)
-let typ_to_ty t =
+let rec typ_to_ty t =
   match t with
   | Int -> BaseTy IntBty
   | TyString -> BaseTy TyStringBty
   | Bool -> BaseTy BoolBty
   | Unit -> BaseTy UnitBty
   | Any -> TAny
+  | TConstr ("ref", [inner]) -> BaseTy (Defty ("Ref", [typ_to_ty inner]))
+  | TConstr (type_name, args) when Hashtbl.mem ref_lowercase_to_name type_name ->
+      let orig = Hashtbl.find ref_lowercase_to_name type_name in
+      BaseTy (Defty (orig, List.map typ_to_ty args))
   | _ -> TAny  (* Default for complex types *)
+
+(** Convert TypeScript type AST JSON to Hiptypes ty.
+    Unlike translate_type (which produces Hipcore_common.Types.typ),
+    this produces Hiptypes.ty which supports Union types. *)
+let rec translate_type_to_ty json =
+  try
+    match get_kind json with
+    | "NumberKeyword"  -> BaseTy IntBty
+    | "StringKeyword"  -> BaseTy TyStringBty
+    | "BooleanKeyword" -> BaseTy BoolBty
+    | "VoidKeyword"    -> BaseTy UnitBty
+    | "AnyKeyword"     -> TAny
+    | "UnionType" ->
+        let members =
+          try json |> member "types" |> to_list
+          with _ ->
+            try json |> member "children" |> to_list
+            with _ -> []
+        in
+        (match members with
+         | [] -> TAny
+         | [single] -> translate_type_to_ty single
+         | first :: rest ->
+             List.fold_left (fun acc m -> Union (acc, translate_type_to_ty m))
+               (translate_type_to_ty first) rest)
+    | "TypeReference" ->
+        let type_name =
+          try json |> member "typeName" |> get_identifier
+          with _ -> ""
+        in
+        if Hashtbl.mem ref_type_registry type_name then
+          let fields = Hashtbl.find ref_type_registry type_name in
+          let type_args =
+            try json |> member "typeArguments" |> to_list
+            with _ -> []
+          in
+          let ty_args = List.map translate_type_to_ty type_args in
+          if List.length fields = 1 then
+            (* Single-field: use "Ref" for backward compat *)
+            BaseTy (Defty ("Ref", if ty_args = [] then [TAny] else ty_args))
+          else
+            BaseTy (Defty (type_name, if ty_args = [] then [TAny] else ty_args))
+        else TAny
+    | _ -> TAny
+  with _ -> TAny
 
 (** Generate default specification from function signature *)
 (* COMMENTED OUT: Heifer's type inference provides better specs
@@ -746,33 +836,33 @@ let rec translate_expr ctx json continuation =
       (match children with
        | [obj_json; prop_json] ->
            let property_name = get_identifier prop_json in
-           (* Check if this is accessing .value on a Ref<T> type *)
-           if property_name = "value" then
-             (* Try to get the object's name and type *)
-             let obj_name_opt =
-               try Some (get_identifier obj_json)
-               with _ -> None
-             in
-             match obj_name_opt with
-             | Some obj_name ->
-                 let obj_type = get_type ctx obj_name in
-                 (match is_ref_type obj_type with
-                  | Some inner_type ->
-                      (* x.value on Ref<T> becomes CRead x (deref: !x) *)
-                      { core_desc = CRead obj_name;
-                        core_type = inner_type }
-                  | None ->
-                      (* Not a ref type, use regular field access *)
-                      let obj_expr = translate_expr ctx obj_json continuation in
-                      { core_desc = CGetField (obj_expr, property_name);
-                        core_type = Any })
-             | None ->
-                 (* Complex expression, use regular field access *)
-                 let obj_expr = translate_expr ctx obj_json continuation in
-                 { core_desc = CGetField (obj_expr, property_name);
-                   core_type = Any }
+           (* Check if this is accessing a registered ref field on a ref type *)
+           let obj_name_opt =
+             try Some (get_identifier obj_json)
+             with _ -> None
+           in
+           let is_ref_access = match obj_name_opt with
+             | Some obj_name -> is_ref_field_access property_name (get_type ctx obj_name)
+             | None -> false
+           in
+           if is_ref_access then
+             let obj_name = Option.get obj_name_opt in
+             let obj_type = get_type ctx obj_name in
+             (match obj_type with
+              | TConstr (tname, _) when is_single_field_ref tname ->
+                  (* Single-field ref: x.value on Ref<T> becomes CRead x (deref: !x) *)
+                  let inner_type = match is_ref_type obj_type with
+                    | Some t -> t | None -> Any in
+                  { core_desc = CRead obj_name;
+                    core_type = inner_type }
+              | _ ->
+                  (* Multi-field: p.x becomes CRead "p.x" — per-field decomposition *)
+                  let obj_name = Option.get obj_name_opt in
+                  let dotted_name = obj_name ^ "." ^ property_name in
+                  { core_desc = CRead dotted_name;
+                    core_type = Any })
            else
-             (* Non-.value property access *)
+             (* Non-ref-registered property access *)
              let obj_expr = translate_expr ctx obj_json continuation in
              { core_desc = CGetField (obj_expr, property_name);
                core_type = Any }
@@ -898,43 +988,39 @@ and translate_assignment ctx lhs rhs continuation =
       (match children with
        | [obj_json; prop_json] ->
            let field_name = get_identifier prop_json in
-           (* Check if this is x.value = v on Ref<T> *)
-           if field_name = "value" then
-             let obj_name_opt =
-               try Some (get_identifier obj_json)
-               with _ -> None
-             in
-             match obj_name_opt with
-             | Some obj_name ->
-                 let obj_type = get_type ctx obj_name in
-                 (match is_ref_type obj_type with
-                  | Some _inner_type ->
-                      (* x.value = v on Ref<T> becomes CWrite (x, v) *)
-                      let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
-                      let rhs_expr = translate_expr ctx rhs unit_cont in
-                      maybe_var (fun rhs_term ->
-                        let write_stmt = { core_desc = CWrite (obj_name, rhs_term); core_type = Unit } in
-                        { core_desc = CSequence (write_stmt, continuation);
-                          core_type = continuation.core_type }
-                      ) rhs_expr
-                  | None ->
-                      (* Not a ref, use regular field assignment *)
-                      let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
-                      let obj_expr = translate_expr ctx obj_json unit_cont in
-                      let rhs_expr = translate_expr ctx rhs unit_cont in
-                      let set_stmt = { core_desc = CSetField (obj_expr, field_name, rhs_expr);
-                                      core_type = Unit } in
-                      { core_desc = CSequence (set_stmt, continuation);
-                        core_type = continuation.core_type })
-             | None ->
-                 (* Complex expression, use regular field assignment *)
-                 let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
-                 let obj_expr = translate_expr ctx obj_json unit_cont in
-                 let rhs_expr = translate_expr ctx rhs unit_cont in
-                 let set_stmt = { core_desc = CSetField (obj_expr, field_name, rhs_expr);
-                                 core_type = Unit } in
-                 { core_desc = CSequence (set_stmt, continuation);
-                   core_type = continuation.core_type }
+           (* Check if this is x.field = v on a registered ref type *)
+           let obj_name_opt =
+             try Some (get_identifier obj_json)
+             with _ -> None
+           in
+           let is_ref_write = match obj_name_opt with
+             | Some obj_name -> is_ref_field_access field_name (get_type ctx obj_name)
+             | None -> false
+           in
+           if is_ref_write then
+             let obj_name = Option.get obj_name_opt in
+             let obj_type = get_type ctx obj_name in
+             (match obj_type with
+              | TConstr (tname, _) when is_single_field_ref tname ->
+                  (* Single-field ref: x.value = v becomes CWrite (x, v) *)
+                  let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+                  let rhs_expr = translate_expr ctx rhs unit_cont in
+                  maybe_var (fun rhs_term ->
+                    let write_stmt = { core_desc = CWrite (obj_name, rhs_term); core_type = Unit } in
+                    { core_desc = CSequence (write_stmt, continuation);
+                      core_type = continuation.core_type }
+                  ) rhs_expr
+              | _ ->
+                  (* Multi-field: p.x = v becomes CWrite("p.x", v) — per-field decomposition *)
+                  let obj_name = Option.get obj_name_opt in
+                  let dotted_name = obj_name ^ "." ^ field_name in
+                  let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+                  let rhs_expr = translate_expr ctx rhs unit_cont in
+                  maybe_var (fun rhs_term ->
+                    let write_stmt = { core_desc = CWrite (dotted_name, rhs_term); core_type = Unit } in
+                    { core_desc = CSequence (write_stmt, continuation);
+                      core_type = continuation.core_type }
+                  ) rhs_expr)
            else
              (* Non-.value field assignment *)
              let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
@@ -1245,6 +1331,9 @@ let extract_function_info ctx json =
   let rec translate_body stmts cont =
     match stmts with
     | [] -> cont
+    | [stmt] ->
+        if stmt = `Null then cont
+        else translate_stmt ctx stmt cont
     | stmt :: rest ->
         if stmt = `Null then translate_body rest cont
         else
@@ -1253,7 +1342,13 @@ let extract_function_info ctx json =
            | "VariableStatement" | "FirstStatement" ->
                translate_var_decl ctx stmt [] rest_expr
            | _ ->
-               translate_stmt ctx stmt rest_expr)
+               (* Translate statement with a unit continuation to avoid
+                  embedding rest_expr inside stmt_expr (which causes
+                  double execution). Then CSequence with rest_expr. *)
+               let unit_cont = { core_desc = CValue { term_desc = Const ValUnit; term_type = Unit }; core_type = Unit } in
+               let stmt_expr = translate_stmt ctx stmt unit_cont in
+               { core_desc = CSequence (stmt_expr, rest_expr);
+                 core_type = rest_expr.core_type })
   in
 
   (* Body no longer needs wrapping - globals are now parameters *)
@@ -1284,10 +1379,115 @@ let extract_function_info ctx json =
   (name, all_params, spec_opt, case_spec_opt, body_with_ret_type, [], None)
 
 let translate_program_to_intermediates json =
+  (* Clear ref type registries to avoid leaking state between translation runs *)
+  Hashtbl.clear ref_type_registry;
+  Hashtbl.clear ref_lowercase_to_name;
   let ctx = create_context () in
   let statements = json |> member "statements" |> to_list in
 
-  (* Pre-pass: Register all top-level variables in context *)
+  (* Shared helper: extract (field_name * param_index option) from PropertySignature list *)
+  let extract_fields_from_props props param_map =
+    List.filter_map (fun prop ->
+      let prop_children = try prop |> member "children" |> to_list with _ -> [] in
+      let field_name = match prop_children with
+        | id :: _ -> (try get_identifier id with _ -> "")
+        | [] -> ""
+      in
+      if field_name = "" then None
+      else
+        let param_idx = match prop_children with
+          | _ :: tr :: _ when get_kind tr = "TypeReference" ->
+              (try
+                 let ref_name = tr |> member "typeName" |> get_identifier in
+                 Hashtbl.find_opt param_map ref_name
+               with _ -> None)
+          | _ -> None
+        in
+        Some (field_name, param_idx)
+    ) props
+  in
+
+  (* Shared helper: build type-parameter name-to-index map from TypeParameter children *)
+  let build_param_map rest =
+    let type_params = List.filter (fun c -> get_kind c = "TypeParameter") rest in
+    let param_map = Hashtbl.create 4 in
+    List.iteri (fun idx tp ->
+      let tp_name =
+        let tp_children = try tp |> member "children" |> to_list with _ -> [] in
+        match tp_children with
+        | [id] -> (try get_identifier id with _ -> "")
+        | _ -> (try get_identifier tp with _ -> "")
+      in
+      if tp_name <> "" then Hashtbl.replace param_map tp_name idx
+    ) type_params;
+    param_map
+  in
+
+  (* Shared helper: register a type if it has at least 1 field *)
+  let register_type type_name param_map field_list =
+    if type_name <> "" && List.length field_list > 0 then begin
+      Hashtbl.replace ref_type_registry type_name field_list;
+      let lc = String.lowercase_ascii type_name in
+      Hashtbl.replace ref_lowercase_to_name lc type_name;
+      (* Single-field generic types use "ref" internally *)
+      if List.length field_list = 1 && Hashtbl.length param_map > 0 then
+        Hashtbl.replace ref_lowercase_to_name "ref" type_name
+    end
+  in
+
+  (* Pre-pass 0: Detect type aliases and interfaces *)
+  List.iter (fun stmt ->
+    match get_kind stmt with
+    | "TypeAliasDeclaration" ->
+        let children = try stmt |> member "children" |> to_list with _ -> [] in
+        (match children with
+         | name_json :: rest ->
+             let type_name = try get_identifier name_json with _ -> "" in
+             let param_map = build_param_map rest in
+             (* Find TypeLiteral *)
+             let type_lits = List.filter (fun c -> get_kind c = "TypeLiteral") rest in
+             (match type_lits with
+              | [tl] ->
+                  let tl_children = try tl |> member "children" |> to_list with _ -> [] in
+                  let props = List.filter (fun c -> get_kind c = "PropertySignature") tl_children in
+                  let field_list = extract_fields_from_props props param_map in
+                  register_type type_name param_map field_list
+              | _ -> ())
+         | [] -> ())
+
+    | "InterfaceDeclaration" ->
+        let children = try stmt |> member "children" |> to_list with _ -> [] in
+        (match children with
+         | name_json :: rest ->
+             let type_name = try get_identifier name_json with _ -> "" in
+             let param_map = build_param_map rest in
+             (* Interface: PropertySignature are direct children (no TypeLiteral wrapper) *)
+             let props = List.filter (fun c -> get_kind c = "PropertySignature") rest in
+             let field_list = extract_fields_from_props props param_map in
+             (* Check for HeritageClause — interface inheritance *)
+             let heritage = List.filter (fun c -> get_kind c = "HeritageClause") rest in
+             let parent_fields = List.concat_map (fun hc ->
+               let hc_children = try hc |> member "children" |> to_list with _ -> [] in
+               List.concat_map (fun expr_with_types ->
+                 let parent_name =
+                   let ewt_children = try expr_with_types |> member "children" |> to_list with _ -> [] in
+                   match ewt_children with
+                   | [id] -> (try get_identifier id with _ -> "")
+                   | _ -> (try get_identifier expr_with_types with _ -> "")
+                 in
+                 match Hashtbl.find_opt ref_type_registry parent_name with
+                 | Some parent_fl -> parent_fl
+                 | None -> []
+               ) hc_children
+             ) heritage in
+             let all_fields = parent_fields @ field_list in
+             register_type type_name param_map all_fields
+         | [] -> ())
+
+    | _ -> ()
+  ) statements;
+
+  (* Pre-pass 1: Register all top-level variables in context *)
   List.iter (fun stmt ->
     match get_kind stmt with
     | "VariableStatement" | "FirstStatement" ->

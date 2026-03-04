@@ -171,7 +171,7 @@ let infer_spec (prog : core_program) (meth : meth_def) =
 (** Try to verify a method using the new seplogic system.
     Returns Some(result) if verification was attempted, None if not applicable. *)
 let try_seplogic_verify (prog : core_program) (meth : meth_def) (given_spec : staged_spec) : bool option =
-  let open Seplogic in
+  let open Hipprover in
   try
     (* Translate declared spec to sl_spec_disj (supports disjunction in declared specs) *)
     let declared_sl = Sl_types.sl_spec_disj_of_staged given_spec in

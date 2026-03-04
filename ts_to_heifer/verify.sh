@@ -14,7 +14,7 @@ if [ $# -lt 1 ]; then
   echo "Usage: $0 <input.ts>"
   echo ""
   echo "Example:"
-  echo "  $0 test/test_cases/01_basic_types.ts"
+  echo "  $0 test/test_cases/ts/01_basic_types.ts"
   echo ""
   echo "This will:"
   echo "  1. Parse TypeScript to JSON AST"

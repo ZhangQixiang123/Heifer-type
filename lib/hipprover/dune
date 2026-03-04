@@ -1,7 +1,7 @@
 (library
  (name hipprover)
  (public_name heifer.hipprover)
- (modules ProversEx entail forward_rules infer_types normalize rewriting rewriting2 heap biab simpl reduce_shift_reset state_entail simple_entail)
+ (modules entail forward_rules infer_types normalize rewriting rewriting2 heap biab simpl reduce_shift_reset state_entail simple_entail sl_types sl_forward sl_entail sl_lib)
  (libraries debug search hipcore provers utils iter provers_common z3 hipcore_typed)
  (inline_tests)
  (preprocess (pps ppx_expect)))

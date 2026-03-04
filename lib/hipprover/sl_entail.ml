@@ -44,7 +44,7 @@ let check_pure_entail (p1: pi) (p2: pi) : bool =
 
 (** Normalize heap to canonical form *)
 let normalize_heap (k: kappa) : kappa =
-  Hipprover.Simpl.simplify_kappa k
+  Simpl.simplify_kappa k
 
 (** Compute frame from biabduction.
     Given declared_pre and inferred_pre, compute:
@@ -54,7 +54,7 @@ let normalize_heap (k: kappa) : kappa =
 let compute_frame (declared_kappa: kappa) (inferred_kappa: kappa)
     : kappa * kappa * pi list =
   let _common, anti_frame, frame, equalities =
-    Hipprover.Biab.solve Hipprover.Biab.emp_biab_ctx declared_kappa inferred_kappa
+    Biab.solve Biab.emp_biab_ctx declared_kappa inferred_kappa
   in
   let frame_heap = Syntax.sep_conj frame in
   let anti_frame_heap = Syntax.sep_conj anti_frame in

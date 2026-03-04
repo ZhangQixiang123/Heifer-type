@@ -264,11 +264,22 @@ kappa:
       { PointsTo (v, t) }
   | v = TYVAR MINUSGREATER t = term
       { PointsTo (v, t) }
-  (* Record points-to: v -> {f1: t1, f2: t2, ...} *)
+  (* Dotted points-to: p.x -> vx — per-field decomposition *)
+  | v = LOWERCASE_IDENT DOT f = LOWERCASE_IDENT MINUSGREATER t = term
+      { PointsTo (v ^ "." ^ f, t) }
+  | v = TYVAR DOT f = LOWERCASE_IDENT MINUSGREATER t = term
+      { PointsTo (v ^ "." ^ f, t) }
+  (* Record points-to: v -> {f1: t1, f2: t2, ...} — desugared to per-field PointsTo *)
   | v = LOWERCASE_IDENT MINUSGREATER LBRACE fields = separated_nonempty_list(COMMA, record_field) RBRACE
-      { RecordPointsTo (v, fields) }
+      { List.fold_left (fun acc (f, t) ->
+          let cell = PointsTo (v ^ "." ^ f, t) in
+          match acc with EmptyHeap -> cell | _ -> SepConj (acc, cell)
+        ) EmptyHeap fields }
   | v = TYVAR MINUSGREATER LBRACE fields = separated_nonempty_list(COMMA, record_field) RBRACE
-      { RecordPointsTo (v, fields) }
+      { List.fold_left (fun acc (f, t) ->
+          let cell = PointsTo (v ^ "." ^ f, t) in
+          match acc with EmptyHeap -> cell | _ -> SepConj (acc, cell)
+        ) EmptyHeap fields }
   | k1 = kappa STAR k2 = kappa
       { SepConj (k1, k2) }
   | k = delimited(LPAREN, kappa, RPAREN)

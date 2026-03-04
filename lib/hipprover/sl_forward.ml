@@ -328,7 +328,7 @@ let rec sl_forward (_env: sl_fvenv) (expr: core_lang) : sl_result =
   | CLambda _ -> SL_Unsupported "Lambda expressions"
   | CShift _ -> SL_Unsupported "Shift"
   | CReset _ -> SL_Unsupported "Reset"
-  (* Record creation: exists loc. ens res=loc * loc->{f1: v1, ...} *)
+  (* Record creation: exists loc. ens res=loc * loc.f1->v1 * loc.f2->v2 ... *)
   | CRecord fields ->
       (* For simple field values, extract directly *)
       let field_terms = List.filter_map (fun (name, field_expr) ->
@@ -340,15 +340,22 @@ let rec sl_forward (_env: sl_fvenv) (expr: core_lang) : sl_result =
         SL_Unsupported "Complex field expressions in records"
       else
         let loc = fresh_var "rec" in
-        let record_type = TRecord (List.map (fun (n, t) -> (n, t.term_type)) field_terms) in
-        let loc_term = var_term loc record_type in
+        let loc_term = var_term loc expr.core_type in
+        let binder = (loc, expr.core_type) in
+        (* Per-field decomposition: each field is a separate PointsTo *)
+        let field_heap = List.fold_left (fun acc (fname, fterm) ->
+          let cell = PointsTo (loc ^ "." ^ fname, fterm) in
+          match acc with
+          | EmptyHeap -> cell
+          | _ -> SepConj (acc, cell)
+        ) EmptyHeap field_terms in
         single_result {
           sl_pre = None;
           sl_post = {
             qs_forall = [];
-            qs_exists = [(loc, record_type)];
+            qs_exists = [binder];
             qs_pure = res_eq loc_term;
-            qs_heap = RecordPointsTo (loc, field_terms);
+            qs_heap = field_heap;
           }
         }
 
